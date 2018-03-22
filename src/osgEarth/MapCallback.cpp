@@ -45,6 +45,14 @@ MapCallback::onMapModelChanged( const MapModelChange& change )
         onLayerMoved(change.getLayer(), change.getFirstIndex(), change.getSecondIndex());
         break;
 
+    case MapModelChange::BEGIN_BATCH_UPDATE:
+	onBeginUpdate();
+	break;
+
+    case MapModelChange::END_BATCH_UPDATE:
+	onEndUpdate();
+	break;
+
     default: 
         break;
     }
