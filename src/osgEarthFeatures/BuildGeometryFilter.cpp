@@ -1472,7 +1472,7 @@ BuildGeometryFilter::push( FeatureList& input, FilterContext& context )
         }
     }
 
-    // indicate that geometry contains clamping attributes
+    //// indicate that geometry contains clamping attributes
     if (_style.has<AltitudeSymbol>() &&
         _style.get<AltitudeSymbol>()->technique() == AltitudeSymbol::TECHNIQUE_GPU)
     {
