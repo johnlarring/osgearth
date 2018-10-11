@@ -244,19 +244,52 @@ URI::getConfig() const
     conf.setReferrer(context().referrer());
     conf.setIsLocation(true);
 
+#if 1    // Backward compat for http_header hack on osgearth-2.9
+    Config headersconf("headers");
+
+    // First, add proper headers
     const Headers& headers = context().getHeaders();
     if (!headers.empty())
     {
-        Config headersconf("headers");
-        for(Headers::const_iterator i = headers.begin(); i != headers.end(); ++i)
-        {
-            if (!i->first.empty() && !i->second.empty())
-            {
-                headersconf.add(Config(i->first, i->second));
-            }
-        }
-        conf.add(headersconf);
+	for(Headers::const_iterator i = headers.begin(); i != headers.end(); ++i)
+	{
+	    if (!i->first.empty() && !i->second.empty())
+	    {
+		headersconf.add(Config(i->first, i->second));
+	    }
+	}
     }
+
+    // Read hack header and add if not in conflict
+    std::string httpHeader;
+    conf.set("http_header", httpHeader);
+    if (!httpHeader.empty() && !headersconf.hasChild("OAuth-Key"))
+    {
+	// http_header content is "Authorization: Bearer YOUR-TOKEN-STRING".
+	// Strip all text except oauth token
+	std::string prefix("Authorization: Bearer ");
+	httpHeader.erase(0,prefix.size());
+	headersconf.add(Config("OAuth-Key", httpHeader));
+    }
+
+    if (!headersconf.empty())
+	conf.add(headersconf);
+
+#else // original 2.10 code
+    const Headers& headers = context().getHeaders();
+    if (!headers.empty())
+    {
+	Config headersconf("headers");
+	for(Headers::const_iterator i = headers.begin(); i != headers.end(); ++i)
+	{
+	    if (!i->first.empty() && !i->second.empty())
+	    {
+		headersconf.add(Config(i->first, i->second));
+	    }
+	}
+	conf.add(headersconf);
+    }
+#endif
 
     return conf;
 }
