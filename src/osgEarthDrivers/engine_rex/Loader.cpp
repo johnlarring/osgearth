@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
  * Copyright 2008-2014 Pelican Mapping
  * http://osgearth.org
  *
@@ -206,13 +206,13 @@ _numLODs       ( 20u )
 void
 PagerLoader::setNumLODs(unsigned lods)
 {
-    _numLODs = std::max(lods, 1u);
+    _numLODs = osg::maximum(lods, 1u);
 }
 
 void
 PagerLoader::setMergesPerFrame(int value)
 {
-    _mergesPerFrame = std::max(value, 0);
+    _mergesPerFrame = osg::maximum(value, 0);
     this->setNumChildrenRequiringUpdateTraversal( 1 );
     OE_INFO << LC << "Merges per frame = " << _mergesPerFrame << std::endl;
     

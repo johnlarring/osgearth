@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2018 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -152,8 +152,8 @@ namespace
         std::string _name;
         ToggleDefine(osg::StateSet* ss, const std::string& name) : _ss(ss), _name(name) { }
         void onValueChanged(Control* c, bool value) {
-            if (value) _ss->setDefine(_name);
-            else _ss->removeDefine(_name);
+            if (value) _ss->setDefine(_name, osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+            else _ss->setDefine(_name, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE); //(_name);
         }
     };
 }
@@ -743,7 +743,7 @@ namespace
         ui::LabelControl* _label;
         void onValueChanged(ui::Control* control, float value )
         {
-            int m = std::min((int)value, 11);
+            int m = osg::minimum((int)value, 11);
             DateTime d = _sky->getDateTime();
             _sky->setDateTime(DateTime(d.year(), m, d.day(), d.hours()));
             _label->setText(s_month[m]);

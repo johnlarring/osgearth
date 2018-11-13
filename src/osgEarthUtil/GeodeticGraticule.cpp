@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2018 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -186,6 +186,8 @@ GeodeticGraticule::init()
 
     // Initialize the formatter
     _formatter = new LatLongFormatter(osgEarth::Util::LatLongFormatter::FORMAT_DEGREES_MINUTES_SECONDS_TERSE, LatLongFormatter::USE_SYMBOLS |LatLongFormatter::USE_PREFIXES);
+
+    _labelingEngine = 0L;
     
     _root = new MyGroup(this);
 }
@@ -195,8 +197,10 @@ GeodeticGraticule::addedToMap(const Map* map)
 {
     if (map->isGeocentric())
     {
-        _map = map;
         _mapSRS = map->getSRS();
+        if (!_mapSRS.valid())
+            _mapSRS = SpatialReference::get("wgs84");
+
         rebuild();
     }
     else
@@ -337,6 +341,7 @@ GeodeticGraticule::setMapNode(MapNode* mapNode)
 
         stateset->addUniform(new osg::Uniform(COLOR_UNIFORM, options().color().get()));
         stateset->addUniform(new osg::Uniform(WIDTH_UNIFORM, options().lineWidth().get()));
+        updateGridLineVisibility();
 
         _callback = new GraticuleTerrainCallback(this);
         mapNode->getTerrainEngine()->addCullCallback(_callback.get());
@@ -347,10 +352,7 @@ void
 GeodeticGraticule::rebuild()
 {
     // clear everything out
-    if (!_root.valid())
-        return;
-
-    if (!_mapSRS.valid())
+    if (!_root.valid() || !_mapSRS.valid())
         return;
 
     // start from scratch
@@ -514,7 +516,7 @@ GeodeticGraticule::getViewExtent(osgUtil::CullVisitor* cullVisitor) const
     {
         double f, a, zn, zf;
         proj.getPerspective(f,a,zn,zf);
-        zf = std::min(zf, eye.length()-1000.0);
+        zf = osg::minimum(zf, eye.length()-1000.0);
         proj.makePerspective(f, a, zn, zf);
 
         nearPlane = proj(3,2) / (proj(2,2)-1.0);
@@ -580,6 +582,12 @@ GeodeticGraticule::getViewExtent(osgUtil::CullVisitor* cullVisitor) const
 void
 GeodeticGraticule::updateLabels()
 {
+    if (!_labelingEngine)
+    {
+        OE_WARN << "LabelingEngine is not set" << std::endl;
+        return;
+    }
+
     const osgEarth::SpatialReference* srs = osgEarth::SpatialReference::create("wgs84");
 
     Threading::ScopedMutexLock lock(_cameraDataMapMutex);
