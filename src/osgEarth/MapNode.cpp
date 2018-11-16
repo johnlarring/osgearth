@@ -469,18 +469,24 @@ MapNode::getConfig() const
         }
     }
 
+    Config ext = externalConfig();
+
     typedef std::vector< osg::ref_ptr<Extension> > Extensions;
     for(Extensions::const_iterator i = getExtensions().begin(); i != getExtensions().end(); ++i)
     {
         Extension* e = i->get();
-        Config conf = e->getConfigOptions().getConfig();
-        if ( !conf.key().empty() )
-        {
-            mapConf.add( conf );
-        }
+	// Don't write extensions more than once, and don't write extensions
+	// defined in external config.
+	if (!mapConf.hasChild(e->getName()) && !ext.hasChild(e->getName()))
+	{
+	    Config conf = e->getConfigOptions().getConfig();
+	    if ( !conf.key().empty() )
+	    {
+		mapConf.add( conf );
+	    }
+	}
     }
 
-    Config ext = externalConfig();
     if ( !ext.empty() )
     {
         ext.key() = "external";
