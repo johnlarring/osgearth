@@ -7,6 +7,7 @@ SET(TARGET_SRC
     GeoExtentTests.cpp
     FeatureTests.cpp
     ImageLayerTests.cpp
+    SerializerTests.cpp
     SpatialReferenceTests.cpp
     ThreadingTests.cpp
     )
