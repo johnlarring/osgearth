@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
  * Copyright 2008-2014 Pelican Mapping
  * http://osgearth.org
  *
@@ -18,31 +18,31 @@
  */
 #include "JoinFeatureFilterOptions"
 
-#include <osgEarthFeatures/Filter>
-#include <osgEarthFeatures/FeatureCursor>
+#include <osgEarth/Filter>
+#include <osgEarth/FeatureCursor>
 
 #include <osgDB/FileNameUtils>
 #include <osgDB/FileUtils>
 #include <osgEarth/Registry>
 #include <osgEarth/ImageUtils>
-#include <osgEarthFeatures/FeatureSource>
-#include <osgEarthFeatures/FilterContext>
-#include <osgEarthSymbology/Geometry>
+#include <osgEarth/FeatureSource>
+#include <osgEarth/FilterContext>
+#include <osgEarth/Geometry>
+#include <osgEarth/Metrics>
 
 #define LC "[Intersect FeatureFilter] "
 
 using namespace osgEarth;
-using namespace osgEarth::Features;
 using namespace osgEarth::Drivers;
-using namespace osgEarth::Symbology;
 
 
-
+/**
+ * Spatial Join: This feature finds all the features in a secondary feature source
+ * that intersect the input feature's extent, and adds their attributes to the
+ * input feature.
+ */
 class JoinFeatureFilter : public FeatureFilter, public JoinFeatureFilterOptions
 {
-private:
-    osg::ref_ptr< FeatureSource > _featureSource;
-
 public:
     JoinFeatureFilter(const ConfigOptions& options)
         : FeatureFilter(), JoinFeatureFilterOptions(options)
@@ -53,14 +53,9 @@ public: // FeatureFilter
 
     Status initialize(const osgDB::Options* readOptions)
     {
-        // Load the feature source containing the intersection geometry.
-        _featureSource = FeatureSourceFactory::create( features().get() );
-        if ( !_featureSource.valid() )
-            return Status::Error(Status::ServiceUnavailable, Stringify() << "Failed to create feature driver \"" << features()->getDriver() << "\"");
-
-        const Status& fs = _featureSource->open(readOptions);
-        if (fs.isError())
-            return fs;
+        Status fsStatus = featureSource().open(readOptions);
+        if (fsStatus.isError())
+            return fsStatus;
 
         return Status::OK();
     }
@@ -70,12 +65,21 @@ public: // FeatureFilter
      */
     void getFeatures(const GeoExtent& extent, FeatureList& features, ProgressCallback* progress)
     {
-        GeoExtent localExtent = extent.transform( _featureSource->getFeatureProfile()->getSRS() );
-        Query query;
-        query.bounds() = localExtent.bounds();
-        if (localExtent.intersects( _featureSource->getFeatureProfile()->getExtent()))
+        FeatureSource* fs = featureSource().getLayer();
+        if (!fs)
+            return;
+
+        OE_PROFILING_ZONE;
+
+        //TODO: should this be Profile::transformAndClampExtent instead?
+        GeoExtent extentInFeatureSRS = extent.transform( fs->getFeatureProfile()->getSRS() );
+
+        if (extentInFeatureSRS.intersects( fs->getFeatureProfile()->getExtent()))
         {
-            osg::ref_ptr< FeatureCursor > cursor = _featureSource->createFeatureCursor( query, progress );
+            Query query;
+            query.bounds() = extentInFeatureSRS.bounds();
+
+            osg::ref_ptr<FeatureCursor> cursor = fs->createFeatureCursor(query, {}, nullptr, progress);
             if (cursor)
             {
                 cursor->fill( features );
@@ -83,49 +87,56 @@ public: // FeatureFilter
         }     
     }
 
+    //! Joins the boundaries attributes into the features by doing a
+    //! spatial intersection.
+    void combine(FeatureList& boundaries, FeatureList& input, FilterContext& context) const
+    {
+        OE_PROFILING_ZONE;
+
+        // Transform the boundaries into the coordinate system of the features
+        // for fast intersection testing
+        for (auto& boundary : boundaries)
+        {
+            boundary->transform(context.profile()->getSRS());
+        }
+
+        // For each feature, check for a spatial join:
+        for (auto& feature : input)
+        {
+            if (feature.valid() && feature->getGeometry())
+            {
+                for (const auto& boundary : boundaries)
+                {
+                    if (boundary->getGeometry()->intersects(feature->getGeometry()))
+                    {
+                        // Copy the attributes from the boundary to the feature (and overwrite)
+                        for (const auto& attr : boundary->getAttrs())
+                        {
+                            feature->set(attr.first, attr.second);
+                        }
+
+                        // upon success, don't check any more boundaries:
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+
     FilterContext push(FeatureList& input, FilterContext& context)
     {
-        if (_featureSource.valid())
+        OE_PROFILING_ZONE;
+
+        if (featureSource().getLayer())
         {
             // Get any features that intersect this query.
             FeatureList boundaries;
-            getFeatures(context.extent().get(), boundaries, 0L); // TODO: progress...
+            getFeatures(context.extent().get(), boundaries, nullptr); // TODO: progress...
 
             if (!boundaries.empty())
             {
-                // Transform the boundaries into the coordinate system of the features
-                for (FeatureList::iterator itr = boundaries.begin(); itr != boundaries.end(); ++itr)
-                {
-                    itr->get()->transform( context.profile()->getSRS() );
-                }
-
-                for(FeatureList::const_iterator f = input.begin(); f != input.end(); ++f)
-                {
-                    Feature* feature = f->get();
-                    if ( feature && feature->getGeometry() )
-                    {
-                        osg::Vec2d c = feature->getGeometry()->getBounds().center2d();
-                       
-                        if (_featureSource->getFeatureProfile()->getExtent().contains(GeoPoint(feature->getSRS(), c.x(), c.y())))
-                        {
-                            for (FeatureList::iterator itr = boundaries.begin(); itr != boundaries.end(); ++itr)
-                            {
-                                //if (ring && ring->contains2D(c.x(), c.y()))
-                                if (itr->get()->getGeometry()->intersects( feature->getGeometry() ) )
-                                {
-                                    // Copy the attributes in the boundary to the feature
-                                    for (AttributeTable::const_iterator attrItr = itr->get()->getAttrs().begin();
-                                         attrItr != itr->get()->getAttrs().end();
-                                         attrItr++)
-                                    {
-                                        feature->set( attrItr->first, attrItr->second );
-                                    }
-                                    break;
-                                }
-                            }                        
-                        }
-                    }
-                }
+                combine(boundaries, input, context);
             }
         }
 
@@ -158,5 +169,4 @@ public:
 
 REGISTER_OSGPLUGIN(osgearth_featurefilter_join, JoinFeatureFilterPlugin);
 
-//OSGEARTH_REGISTER_SIMPLE_FEATUREFILTER(intersect, IntersectFeatureFilter);
 

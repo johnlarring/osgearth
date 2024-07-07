@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -22,11 +22,55 @@
 using namespace osgEarth;
 
 ProgressCallback::ProgressCallback() :
-osg::Referenced( true ),
-_canceled      ( false ),
-_collectStats  ( false )
+    _canceled(false),
+    _retryDelay_s(0.0f),
+    _cancelable(nullptr)
 {
     //NOP
+}
+
+ProgressCallback::ProgressCallback(Cancelable* cancelable) :
+    _canceled(false),
+    _retryDelay_s(0.0f),
+    _cancelable(cancelable)
+{
+    //NOP
+}
+
+ProgressCallback::ProgressCallback(Cancelable* cancelable, std::function<bool()> predicate) :
+    _canceled(false),
+    _retryDelay_s(0.0f),
+    _cancelable(cancelable),
+    _cancelPredicate(predicate)
+{
+    //NOP
+}
+
+void
+ProgressCallback::cancel()
+{
+    _canceled = true;
+}
+
+void
+ProgressCallback::reset()
+{
+    _canceled = false;
+}
+
+bool
+ProgressCallback::canceled() const
+{
+    if (!_canceled)
+    {
+        if ((shouldCancel()) ||
+            (_cancelable && _cancelable->canceled()) ||
+            (_cancelPredicate && _cancelPredicate()))
+        {
+            _canceled = true;
+        }
+    }
+    return _canceled;
 }
 
 void ProgressCallback::reportError(const std::string& msg)
@@ -43,48 +87,3 @@ bool ProgressCallback::reportProgress(double             current,
     return false;
 }
 
-double& ProgressCallback::stats(const std::string& key)
-{
-    Stats::iterator i = _stats.find(key);
-    if ( i == _stats.end() )
-    {
-        double& value = _stats[key];
-        value = 0.0;
-        return value;
-    }
-    return i->second;
-}
-
-/******************************************************************************/
-ConsoleProgressCallback::ConsoleProgressCallback() :
-ProgressCallback()
-{
-    //NOP
-}
-
-void
-ConsoleProgressCallback::reportError(const std::string& msg)
-{
-    ProgressCallback::reportError(msg);
-    OE_NOTICE << "Error: " << msg << std::endl;
-}
-
-bool
-ConsoleProgressCallback::reportProgress(double current, double total, 
-                                        unsigned stage, unsigned numStages,
-                                        const std::string& msg)
-{
-    if (total > 0)
-    {
-        double percentComplete = (current / total) * 100.0;
-        OE_NOTICE 
-            << "Stage " << (stage+1) << "/" << numStages 
-            << "; completed " << percentComplete << "% " << current << " of " << total 
-            << std::endl;
-    }
-    else
-    {
-        OE_NOTICE << msg << std::endl;
-    }
-    return false;
-}

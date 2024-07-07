@@ -1,29 +1,32 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
- * http://osgearth.org
- *
- * osgEarth is free software; you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>
- */
-#include <osgEarth/VirtualProgram>
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
+* http://osgearth.org
+*
+* osgEarth is free software; you can redistribute it and/or modify
+* it under the terms of the GNU Lesser General Public License as published by
+* the Free Software Foundation; either version 2 of the License, or
+* (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU Lesser General Public License for more details.
+*
+* You should have received a copy of the GNU Lesser General Public License
+* along with this program.  If not, see <http://www.gnu.org/licenses/>
+*/
+#include "VirtualProgram"
+#include "Registry"
+#include "ShaderFactory"
+#include "ShaderLoader"
+#include "ShaderUtils"
+#include "ShaderMerger"
+#include "StringUtils"
+#include "Containers"
+#include "Metrics"
+#include "GLUtils"
 
-#include <osgEarth/Registry>
-#include <osgEarth/Capabilities>
-#include <osgEarth/ShaderFactory>
-#include <osgEarth/ShaderUtils>
-#include <osgEarth/StringUtils>
-#include <osgEarth/Containers>
 #include <osg/Shader>
 #include <osg/Program>
 #include <osg/State>
@@ -31,24 +34,22 @@
 #include <osg/Version>
 #include <osg/GL2Extensions>
 #include <osg/GLExtensions>
+#include <osgDB/FileUtils>
+#include <osgDB/FileNameUtils>
+
 #include <fstream>
 #include <sstream>
-#include <OpenThreads/Thread>
+#include <cstdlib> // getenv
 
 using namespace osgEarth;
-using namespace osgEarth::ShaderComp;
+using namespace osgEarth::Threading;
 
 #define OE_TEST OE_NULL
 //#define OE_TEST OE_NOTICE
-//#define USE_ATTRIB_ALIASES
-//#define DEBUG_APPLY_COUNTS
-//#define DEBUG_ACCUMULATION
 
 #define MAX_CONTEXTS 16
 
 #define MAX_PROGRAM_CACHE_SIZE 128
-
-//#define USE_STACK_MEMORY
 
 #define PREALLOCATE_APPLY_VARS
 
@@ -56,37 +57,44 @@ using namespace osgEarth::ShaderComp;
 
 // Without a program repo, we need to store a refptr to the actual Program somewhere.
 #ifndef USE_PROGRAM_REPO
-    #define USE_LAST_USED_PROGRAM
+#define USE_LAST_USED_PROGRAM
 #endif
 
 // Don't use this until we make it safe (combine with ProgramRepo or something) -gw
-//#define USE_POLYSHADER_CACHE
+// MERGE: We can use this, right?
+#define USE_POLYSHADER_CACHE
+
+// Use typeid in lieu of dynamic_cast on inner loops
+// Pro: faster. Con: cannot derive from VirtualProgram.
+#define USE_TYPEID
 
 #define MAKE_SHADER_ID(X) osgEarth::hashString( X )
 
 
 #ifdef USE_POLYSHADER_CACHE
-Threading::Mutex PolyShader::_cacheMutex;
-PolyShader::PolyShaderCache PolyShader::_polyShaderCache;
+std::mutex VirtualProgram::PolyShader::_cacheMutex;
+VirtualProgram::PolyShader::PolyShaderCache VirtualProgram::PolyShader::_polyShaderCache;
 #endif
 
 //------------------------------------------------------------------------
 
 namespace
 {
+    std::atomic_bool s_debugGroupPushed(false);
+
     /** Locate a function by name in the location map. */
-    bool findFunction(const std::string&               name, 
-                      ShaderComp::FunctionLocationMap& flm, 
-                      ShaderComp::Function**           output)
-    {        
-        for(ShaderComp::FunctionLocationMap::iterator i = flm.begin(); i != flm.end(); ++i )
+    bool findFunction(
+        const std::string& name,
+        VirtualProgram::FunctionLocationMap& flm,
+        VirtualProgram::Function** output)
+    {
+        for (auto& locations : flm)
         {
-            ShaderComp::OrderedFunctionMap& ofm = i->second;
-            for( ShaderComp::OrderedFunctionMap::iterator j = ofm.begin(); j != ofm.end(); ++j )
+            for (auto& function : locations.second)
             {
-                if ( j->second._name.compare(name) == 0 )
+                if (function.second._name.compare(name) == 0)
                 {
-                    (*output) = &j->second;
+                    (*output) = &function.second;
                     return true;
                 }
             }
@@ -100,27 +108,57 @@ namespace
 #undef  LC
 #define LC "[ProgramRepo] "
 
+ProgramRepo::ProgramRepo() :
+    _releaseUnusedPrograms(true)
+{
+    const char* value = ::getenv("OSGEARTH_PROGRAM_BINARY_CACHE_PATH");
+    if (value)
+        setProgramBinaryCacheLocation(value);
+}
+
 ProgramRepo::~ProgramRepo()
 {
     releaseGLObjects(NULL);
 }
 
 void
-ProgramRepo::lock()
+ProgramRepo::setReleaseUnusedPrograms(bool value)
 {
-    _m.lock();
+    lock();
+    _releaseUnusedPrograms = value;
+    unlock();
 }
 
-void ProgramRepo::unlock()
+void
+ProgramRepo::setProgramBinaryCacheLocation(const std::string& folder)
 {
-    _m.unlock();
+    lock();
+    if (folder.empty())
+    {
+        _programBinaryCacheFolder.clear();
+    }
+    else if (osgDB::makeDirectory(folder) == true)
+    {
+        _programBinaryCacheFolder = folder;
+    }
+    else
+    {
+        OE_WARN << LC << "Failed to access/create program binary cache location " << folder << std::endl;
+    }
+    unlock();
+}
+
+bool
+ProgramRepo::isProgramBinaryCachingActive() const
+{
+    return _programBinaryCacheFolder.empty() == false;
 }
 
 osg::ref_ptr<osg::Program>
-ProgramRepo::use(const ProgramKey& key, unsigned frameNumber, UID user)
+ProgramRepo::use(const Key& key, unsigned frameNumber, UID user)
 {
-    ProgramMap::iterator i = _db.find( key );
-    if ( i != _db.end() )
+    ProgramMap::iterator i = _db.find(key);
+    if (i != _db.end())
     {
         Entry* e = i->second.get();
         e->_frameLastUsed = frameNumber;
@@ -136,10 +174,10 @@ ProgramRepo::use(const ProgramKey& key, unsigned frameNumber, UID user)
 void
 ProgramRepo::release(UID user, osg::State* state)
 {
-    if (!user)
+    if (user <= 0 || _releaseUnusedPrograms == false)
         return;
 
-    for(ProgramMap::iterator i = _db.begin(); i != _db.end(); )
+    for (ProgramMap::iterator i = _db.begin(); i != _db.end(); )
     {
         Entry* e = i->second.get();
         bool increment = true;
@@ -148,20 +186,20 @@ ProgramRepo::release(UID user, osg::State* state)
         {
             // remove "user" from the users list:
             e->_users.erase(user);
-            
+
             //OE_TEST << LC << "PR REL prog=" << (e->_program.get()) << " user=" << (user) << " total=" << e->_users.size() << std::endl;
 
             if (e->_users.empty())
             {
                 // release the GL memory
                 e->_program->releaseGLObjects(state);
-               
-                OE_TEST << LC << "Released program " << e->_program->getName() << "; dbsize=" << _db.size()-1 << std::endl;
+
+                OE_TEST << LC << "Released program " << e->_program->getName() << "; dbsize=" << _db.size() - 1 << std::endl;
 
                 // remove from the repo
                 _db.erase(i++);
                 increment = false;
-            }            
+            }
         }
 
         if (increment)
@@ -170,21 +208,25 @@ ProgramRepo::release(UID user, osg::State* state)
 }
 
 void
-ProgramRepo::add(const ProgramKey& key, osg::ref_ptr<osg::Program>& in_out, unsigned frameNumber, UID user)
+ProgramRepo::add(
+    const Key& key,
+    osg::ref_ptr<osg::Program>& in_out,
+    unsigned frameNumber,
+    UID user)
 {
     // First try to find an entry with an equivalent program:
-    for(ProgramMap::iterator i = _db.begin(); i != _db.end(); ++i)
+    for (auto& iter : _db)
     {
-        osg::ref_ptr<Entry>& e = i->second;
+        Entry::Ptr& e = iter.second;
 
         // same pointer? do nothing but update the user
         if (e->_program.get() == in_out.get())
         {
-            osg::ref_ptr<Entry>& newEntry = _db[key];
-            newEntry = e.get();
+            Entry::Ptr& newEntry = _db[key];
+            newEntry = e;
             in_out = e->_program.get();
             e->_users.insert(user);
-            
+
             OE_TEST << LC << "PR SHR1 prog=" << e->_program.get() << " user=" << (user) << " total=" << e->_users.size() << std::endl;
 
             return;
@@ -194,19 +236,19 @@ ProgramRepo::add(const ProgramKey& key, osg::ref_ptr<osg::Program>& in_out, unsi
         // and let input go out of scope
         else if (e->_program->compare(*in_out.get()) == 0)
         {
-            osg::ref_ptr<Entry>& newEntry = _db[key];
-            newEntry = e.get();
+            Entry::Ptr& newEntry = _db[key];
+            newEntry = e;
             in_out = e->_program.get();
             e->_users.insert(user);
 
             OE_TEST << LC << "PR SHR2 prog=" << e->_program.get() << " user=" << (user) << " total=" << e->_users.size() << std::endl;
-        
+
             return;
         }
     }
 
-    osg::ref_ptr<Entry>& newEntry = _db[key];    
-    newEntry = new Entry();
+    Entry::Ptr& newEntry = _db[key];
+    newEntry = std::make_shared<Entry>();
     newEntry->_program = in_out.get();
     newEntry->_frameLastUsed = frameNumber;
     newEntry->_users.insert(user);
@@ -232,13 +274,151 @@ ProgramRepo::releaseGLObjects(osg::State* state) const
 {
     OE_TEST << LC << "Main release, size=" << _db.size() << std::endl;
     // First try to find an entry with an equivalent program:
-    for(ProgramMap::iterator i = _db.begin(); i != _db.end(); ++i)
+    for (auto& i : _db)
     {
-        osg::ref_ptr<Entry>& e = i->second;
+        auto& e = i.second;
         e->_program->releaseGLObjects(state);
         OE_TEST << LC << "...released program " << e->_program->getName() << std::endl;
     }
     _db.clear();
+}
+
+void
+ProgramRepo::linkProgram(
+    const Key& key, 
+    osg::Program* program, 
+    osg::Program::PerContextProgram* pcp, 
+    osg::State& state)
+{
+    OE_PROFILING_ZONE_NAMED("link");
+
+    if (isProgramBinaryCachingActive())
+    {
+        bool readFromCache = false;
+        std::fstream fStream;
+        std::string programCacheName;
+
+        // hash the program metadata
+        std::stringstream programCacheNameStream;
+        programCacheNameStream << program->getName();
+        unsigned int hash = 0;
+        for (auto& key_component : key)
+        {
+            //same as boost hash_combine
+            hash ^= key_component + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+        }
+        programCacheNameStream << "_" << hash;
+
+#if OSG_VERSION_LESS_THAN(3,7,0)
+        const std::string& defineStr = state.getDefineString(program->getShaderDefines());
+#else
+        const std::string& defineStr = pcp->getDefineString();
+#endif
+
+        unsigned defineHash = osgEarth::hashString(defineStr);
+        programCacheNameStream << "_" << defineHash;
+        programCacheNameStream << ".bin";
+
+        programCacheName = osgDB::concatPaths(
+            _programBinaryCacheFolder, 
+            osgEarth::toLegalFileName(programCacheNameStream.str(), false, "-"));
+
+        //currently set to be able to read and write to the binary file so only need to open file once.
+        fStream.open(programCacheName.c_str(), std::fstream::in | std::fstream::out | std::fstream::app | std::fstream::binary);
+        if (fStream.is_open())
+        {
+            // get length of file:
+            fStream.seekg(0, fStream.end);
+            int length = fStream.tellg();
+            fStream.seekg(0, fStream.beg);
+
+            if (length > 1)
+            {
+                OE_PROFILING_ZONE_NAMED("LoadShaderProgramBinary");
+                OE_PROFILING_ZONE_TEXT(programCacheName);
+                unsigned char* buffer = new unsigned char[length];
+
+                // read data as a block:
+                GLenum format;
+                fStream.read((char*)&format, sizeof(GLenum));
+                fStream.read((char*)buffer, length - sizeof(GLenum));
+
+                osg::Program::ProgramBinary* binary = new osg::Program::ProgramBinary();
+                binary->setFormat(format);
+                binary->assign(length - sizeof(GLenum), buffer);
+                program->setProgramBinary(binary);
+                readFromCache = true;
+                OE_DEBUG << LC << "Read a program binary from the cache (" << programCacheName << ")" << std::endl;
+            }
+            else
+            {
+                OE_PROFILING_ZONE_NAMED("LoadShaderNotFound");
+                OE_PROFILING_ZONE_TEXT(programCacheName);
+            }
+
+            //If there is not a programBinary then we need to add one
+            // This sets an openGL hint so we can grab it later.
+            if (program->getProgramBinary() == NULL)
+            {
+                program->setProgramBinary(new osg::Program::ProgramBinary());
+            }
+        }
+
+        program->compileGLObjects(state);
+
+        if (fStream.is_open())
+        {
+            if (pcp->isLinked())
+            {
+                if (!readFromCache)
+                {
+                    osg::ref_ptr<osg::Program::ProgramBinary> binary = pcp->compileProgramBinary(state);
+                    if (binary && binary->getSize() > 0)
+                    {
+                        OE_PROFILING_ZONE_NAMED("SaveShaderProgramBinary");
+                        GLenum format = binary->getFormat();
+                        fStream.write((char*)&format, sizeof(GLenum));
+                        fStream.write((char*)binary->getData(), binary->getSize());
+                        fStream.close();
+                        OE_DEBUG << LC << "Wrote a shader binary from the cache (" << programCacheName << ")" << std::endl;
+                    }
+                    else
+                    {
+                        //Should we save off something so we know it is a bad shader instead of just deleting the empty cache file?
+                        fStream.close();
+                        OE_WARN << LC << "Failed to compile program binary (" << programCacheName << ")" << std::endl;
+                        remove(programCacheName.c_str());
+                    }
+                }
+            }
+            else
+            {
+                OE_WARN << LC << "Failed to link program binary (" << programCacheName << ")" << std::endl;
+                fStream.close();
+                remove(programCacheName.c_str());
+            }
+        }
+    }
+    else
+    {
+        program->compileGLObjects(state);
+    }
+}
+
+osg::ref_ptr<VirtualProgram>
+ProgramRepo::getOrCreateVirtualProgram(const std::string& name, std::function<VirtualProgram*()> create)
+{
+    lock();
+
+    auto& vp = _virtualProgramLUT[name];
+    if (!vp.valid())
+    {
+        vp = create();
+    }
+
+    unlock();
+
+    return vp;
 }
 
 //------------------------------------------------------------------------
@@ -265,21 +445,19 @@ namespace
     bool s_dumpShaders = false;        // debugging
 
     /** A device that lets us do a const search on the State's attribute map. OSG does not yet
-        have a const way to do this. It has getAttributeVec() but that is non-const (it creates
-        the vector if it doesn't exist); Newer versions have getAttributeMap(), but that does not
-        go back to OSG 3.0. */
-    struct StateEx : public osg::State 
+    have a const way to do this. It has getAttributeVec() but that is non-const (it creates
+    the vector if it doesn't exist); Newer versions have getAttributeMap(), but that does not
+    go back to OSG 3.0. */
+    struct StateEx : public osg::State
     {
         static const VirtualProgram::AttrStack* getProgramStack(const osg::State& state)
-        {            
+        {
             static osg::StateAttribute::TypeMemberPair pair(VirtualProgram::SA_TYPE, 0);
-            const StateEx* sh = reinterpret_cast<const StateEx*>( &state );
-            AttributeMap::const_iterator i = sh->_attributeMap.find( pair );
+            const StateEx* sh = reinterpret_cast<const StateEx*>(&state);
+            AttributeMap::const_iterator i = sh->_attributeMap.find(pair);
             return i != sh->_attributeMap.end() ? &(i->second.attributeVec) : 0L;
         }
     };
-
-    typedef std::map<std::string, std::string> HeaderMap;
 
     // removes leading and trailing whitespace, and replaces all other
     // whitespace with single spaces
@@ -287,12 +465,12 @@ namespace
     {
         bool inwhite = true;
         std::stringstream buf;
-        for( unsigned i=0; i<in.length(); ++i )
+        for (unsigned i = 0; i < in.length(); ++i)
         {
             char c = in[i];
-            if ( ::isspace(c) )
+            if (::isspace(c))
             {
-                if ( !inwhite )
+                if (!inwhite)
                 {
                     buf << ' ';
                     inwhite = true;
@@ -310,175 +488,7 @@ namespace
         return r;
     }
 
-
-    void parseShaderForMerging( const std::string& source, unsigned& version, std::string& subversion, HeaderMap& extensions, HeaderMap& precisions, HeaderMap& defblocks, HeaderMap& structs, HeaderMap& headers, HeaderMap& deffuncs, std::stringstream& body )
-    {
-    
-        // types we consider declarations
-        std::string dectypesarray[] = {"void", "uniform", "in", "out", "varying", "flat", "bool", "int", "uint", "float", "vec2", "vec3", "vec4", "bvec2", "bvec3", "bvec4", "ivec2", "ivec3", "ivec4", "mat2", "mat3", "mat4", "sampler2D", "samplerCube", "lowp", "mediump", "highp", "attribute", "#extension", "#define"};
-        std::vector<std::string> dectypes (dectypesarray, dectypesarray + sizeof(dectypesarray) / sizeof(dectypesarray[0]) );
-        
-        // store any structs in this as they need to be decalred first
-        std::string structkeyword = "struct";
-        std::string extensionkeyword = "#extension";
-        std::string startdefsarray[] = {"#if", "#ifdef" };
-        std::vector<std::string> startdefs (startdefsarray, startdefsarray + sizeof(startdefsarray) / sizeof(startdefsarray[0]) );
-        
-        // break into lines:
-        StringVector lines;
-        StringTokenizer( source, lines, "\n", "", true, false );
-
-        // keep track of brackets and if we're in global scope indent==0
-        int indent = 0;
-
-        for( StringVector::const_iterator line_iter = lines.begin(); line_iter != lines.end(); ++line_iter )
-        {
-            std::string line = trimAndCompress(*line_iter);
-
-            if ( line.size() > 0 )
-            {
-                StringVector tokens;
-                StringTokenizer( line, tokens, " \t", "", false, true );
-                
-                indent += std::count(line.begin(), line.end(), '{');
-                indent -= std::count(line.begin(), line.end(), '}');
-                
-                // we say it's a declaration if it starts with one of the dectyps, has a ; at the end and is in the global scope
-                bool isdec = (std::find(dectypes.begin(), dectypes.end(), tokens[0]) != dectypes.end() && line[line.size()-1] == ';' && indent == 0) || (tokens[0] == "#define");
-                
-                // discard forward declarations of functions, we know it's a declaration so just see if it has brackets (should be safe)
-                bool isfunc = isdec && (line.find("(") != std::string::npos && line.find(")") != std::string::npos);
-                if(isfunc) continue;
-                
-                // is it a struct decleration
-                bool isstruct = tokens[0] == structkeyword && indent == 0;
-                bool isext = tokens[0] == extensionkeyword && indent == 0;
-                bool isdefblock = std::find(startdefs.begin(), startdefs.end(), tokens[0]) != startdefs.end() && indent == 0;
-
-                if (tokens[0] == "#version")
-                {
-                    // find the highest version number.
-                    if ( tokens.size() > 1 )
-                    {
-                        unsigned newVersion = osgEarth::as<unsigned>(tokens[1], 0);
-                        if ( newVersion > version )
-                        {
-                            version = newVersion;
-                            if(tokens.size() > 2)
-                            {
-                                subversion = tokens[2];
-                            }
-                        }
-                    }
-                }
-                
-                else if(tokens[0] == "precision") {
-                    // precision stored in map of value type to current highest value precision
-                    // dec should be keyword valueprecision type, precision highp float
-                    if(tokens.size() < 3) continue;
-                    std::string& currentlevel = precisions[tokens[2]];
-                    
-                    // see if it's higher
-                    if(currentlevel.empty() || (currentlevel == "lowp" && (tokens[1] == "mediump" || tokens[1] == "highp"))) currentlevel = tokens[1];
-                    if(currentlevel == "mediump" && tokens[1] == "highp") currentlevel = tokens[1];
-                }
-
-                else if (isdec)
-                {
-                    if(headers.find(line) == headers.end())
-                    {
-                        std::string& header = headers[line];
-                        header = line;
-                    }
-                }
-
-                else if (isext)
-                {
-                    std::string& extline = extensions[line];
-                    extline = line;
-                }
-
-                else if(isstruct)
-                {
-                    // scan forward copying all lines till we hit the closing }; of the struct
-                    std::string& structstr = structs[tokens[1]];
-                    while ((*line_iter) != "};") {
-                        structstr += (*line_iter) + "\n";
-                        line_iter++;
-                    }
-                    structstr += "};\n";
-                }
-                
-                else if(isdefblock)
-                {
-                    // san forward copying all lines till we hit the closing endif
-                    
-                    bool containsext = false;
-                    bool containsfunc = false;
-                    int defindent = 1;
-                    std::string blocktr = "";
-                    while(defindent > 0)
-                    {
-                        blocktr += (*line_iter) + "\n";
-                        line_iter++;
-                        std::string defline = trimAndCompress(*line_iter);
-                        if(defline.size() > 0)
-                        {
-                            StringVector deflinetokens;
-                            StringTokenizer( defline, deflinetokens, " \t", "", false, true );
-                            
-                            bool deflineisdec = (std::find(dectypes.begin(), dectypes.end(), deflinetokens[0]) != dectypes.end() && indent == 0);
-                
-                            // discard forward declarations of functions, we know it's a declaration so just see if it has brackets (should be safe)
-                            bool deflineisfunc = deflineisdec && (defline.find("(") != std::string::npos && defline.find(")") != std::string::npos && defline[defline.size()-1] != ';' );
-                            
-                            if(deflineisfunc) deflineisdec = false;
-                            
-                            if(deflinetokens[0] == extensionkeyword) containsext = true;
-                            if(deflineisfunc) containsfunc = true;
-                            if(deflineisdec)
-                            {
-                                // if the var decleration is inside  a def block endsure it's not added to headers
-                                std::string& header = headers[defline];
-                                header = "";
-                            }
-                            
-                            if(std::find(startdefs.begin(), startdefs.end(), deflinetokens[0]) != startdefs.end()) defindent++;
-                            if(deflinetokens[0] == "#endif")
-                            {
-                                defindent--;
-                                if(defindent == 0)
-                                {
-                                    blocktr += "#endif\n";
-                                }
-                            }
-                        }
-                    }
-                    
-                    std::string& defblock = containsext ? extensions[tokens[1]] : (containsfunc ? deffuncs[tokens[1]] : defblocks[tokens[1]]);
-                    defblock += blocktr; // plus equals for now as could have multiple if defs with same arg / token[1]
-                }
-
-                else
-                {
-                    body << (*line_iter) << "\n";
-                }
-            }
-        }
-        
-#if defined(OSG_GLES3_AVAILABLE)
-        // just force gles 3 to use correct version number as shaders in earth files might include a version
-    #if __ANDROID__
-        version = 310;
-    #else
-        version = 300;
-    #endif
-        subversion = "es";
-#endif
-    }
-
-
-    bool s_attribAliasSortFunc(const std::pair<std::string,std::string>& a, const std::pair<std::string,std::string>& b) {
+    bool s_attribAliasSortFunc(const std::pair<std::string, std::string>& a, const std::pair<std::string, std::string>& b) {
         return a.first.size() > b.first.size();
     }
 
@@ -487,45 +497,45 @@ namespace
     * Replaces a shader's attribute values with their aliases
     */
     void applyAttributeAliases(
-        osg::Shader*                             shader, 
+        osg::Shader*                             shader,
         const VirtualProgram::AttribAliasVector& sortedAliases)
     {
         std::string src = shader->getShaderSource();
-        for( VirtualProgram::AttribAliasVector::const_iterator i = sortedAliases.begin(); i != sortedAliases.end(); ++i )
+        for (VirtualProgram::AttribAliasVector::const_iterator i = sortedAliases.begin(); i != sortedAliases.end(); ++i)
         {
             //OE_DEBUG << LC << "Replacing " << i->first << " with " << i->second << std::endl;
-            osgEarth::replaceIn( src, i->first, i->second );
+            osgEarth::replaceIn(src, i->first, i->second);
         }
-        shader->setShaderSource( src );
+        shader->setShaderSource(src);
     }
 
 
     /**
     * Adds a new shader entry to the accumulated shader map, respecting the
-    * override policy of both the existing entry (if there is one) and the 
+    * override policy of both the existing entry (if there is one) and the
     * new entry.
     */
     void addToAccumulatedMap(VirtualProgram::ShaderMap&         accumShaderMap,
-                             const VirtualProgram::ShaderID&    shaderID,
-                             const VirtualProgram::ShaderEntry& newEntry)
-    {        
+        const VirtualProgram::ShaderID&    shaderID,
+        const VirtualProgram::ShaderEntry& newEntry)
+    {
 
         // see if we're trying to disable a previous entry:
-        if ((newEntry._overrideValue & osg::StateAttribute::ON) == 0 ) //TODO: check for higher override
+        if ((newEntry._overrideValue & osg::StateAttribute::ON) == 0) //TODO: check for higher override
         {
             // yes? remove it!
-            accumShaderMap.erase( shaderID );
+            accumShaderMap.erase(shaderID);
         }
 
         else
         {
             // see if there's a higher-up entry with the same ID:
-            VirtualProgram::ShaderEntry& accumEntry = accumShaderMap[ shaderID ]; 
+            VirtualProgram::ShaderEntry& accumEntry = accumShaderMap[shaderID];
 
             // make sure we can add the new one:
-            if ((accumEntry._shader.get() == 0L ) ||                                   // empty slot, fill it
+            if ((accumEntry._shader.get() == 0L) ||                                   // empty slot, fill it
                 ((accumEntry._overrideValue & osg::StateAttribute::PROTECTED) != 0) || // new entry is protected
-                ((accumEntry._overrideValue & osg::StateAttribute::OVERRIDE) == 0) )   // old entry does NOT override
+                ((accumEntry._overrideValue & osg::StateAttribute::OVERRIDE) == 0))   // old entry does NOT override
             {
                 accumEntry = newEntry;
             }
@@ -536,20 +546,20 @@ namespace
     * Apply the data binding information from a template program to the
     * target program.
     */
-    void addTemplateDataToProgram( const osg::Program* templateProgram, osg::Program* program )
+    void addTemplateDataToProgram(const osg::Program* templateProgram, osg::Program* program)
     {
         const osg::Program::FragDataBindingList& fbl = templateProgram->getFragDataBindingList();
-        for( osg::Program::FragDataBindingList::const_iterator i = fbl.begin(); i != fbl.end(); ++i )
-            program->addBindFragDataLocation( i->first, i->second );
+        for (osg::Program::FragDataBindingList::const_iterator i = fbl.begin(); i != fbl.end(); ++i)
+            program->addBindFragDataLocation(i->first, i->second);
 
         const osg::Program::UniformBlockBindingList& ubl = templateProgram->getUniformBlockBindingList();
-        for( osg::Program::UniformBlockBindingList::const_iterator i = ubl.begin(); i != ubl.end(); ++i )
-            program->addBindUniformBlock( i->first, i->second );
+        for (osg::Program::UniformBlockBindingList::const_iterator i = ubl.begin(); i != ubl.end(); ++i)
+            program->addBindUniformBlock(i->first, i->second);
 
         // dont' need unless we're using shader4 ext??
-        program->setParameter( GL_GEOMETRY_VERTICES_OUT_EXT, templateProgram->getParameter(GL_GEOMETRY_VERTICES_OUT_EXT) );
-        program->setParameter( GL_GEOMETRY_INPUT_TYPE_EXT,   templateProgram->getParameter(GL_GEOMETRY_INPUT_TYPE_EXT) );
-        program->setParameter( GL_GEOMETRY_OUTPUT_TYPE_EXT,  templateProgram->getParameter(GL_GEOMETRY_OUTPUT_TYPE_EXT) );
+        program->setParameter(GL_GEOMETRY_VERTICES_OUT_EXT, templateProgram->getParameter(GL_GEOMETRY_VERTICES_OUT_EXT));
+        program->setParameter(GL_GEOMETRY_INPUT_TYPE_EXT, templateProgram->getParameter(GL_GEOMETRY_INPUT_TYPE_EXT));
+        program->setParameter(GL_GEOMETRY_OUTPUT_TYPE_EXT, templateProgram->getParameter(GL_GEOMETRY_OUTPUT_TYPE_EXT));
     }
 
     struct SortByType {
@@ -558,186 +568,73 @@ namespace
         }
     };
 
-    bool shaderInStageMask(osg::Shader* shader, const ShaderComp::StageMask& mask)
+    bool shaderInStageMask(osg::Shader* shader, const VirtualProgram::StageMask& mask)
     {
-        if ( shader->getType() == shader->VERTEX && (mask & STAGE_VERTEX) ) return true;
-        if ( shader->getType() == shader->GEOMETRY && (mask & STAGE_GEOMETRY) ) return true;
-        if ( shader->getType() == shader->TESSCONTROL && (mask & STAGE_TESSCONTROL) ) return true;
-        if ( shader->getType() == shader->TESSEVALUATION && (mask & STAGE_TESSEVALUATION) ) return true;
-        if ( shader->getType() == shader->FRAGMENT && (mask & STAGE_FRAGMENT) ) return true;
-        if ( shader->getType() == shader->COMPUTE && (mask & STAGE_COMPUTE) ) return true;
+        if (shader->getType() == shader->VERTEX && (mask & VirtualProgram::STAGE_VERTEX)) return true;
+        if (shader->getType() == shader->GEOMETRY && (mask & VirtualProgram::STAGE_GEOMETRY)) return true;
+        if (shader->getType() == shader->TESSCONTROL && (mask & VirtualProgram::STAGE_TESSCONTROL)) return true;
+        if (shader->getType() == shader->TESSEVALUATION && (mask & VirtualProgram::STAGE_TESSEVALUATION)) return true;
+        if (shader->getType() == shader->FRAGMENT && (mask & VirtualProgram::STAGE_FRAGMENT)) return true;
+        if (shader->getType() == shader->COMPUTE && (mask & VirtualProgram::STAGE_COMPUTE)) return true;
         return false;
+    }
+
+    std::string getNameForType(osg::Shader::Type type)
+    {
+        return
+            type == osg::Shader::VERTEX ? "VERTEX" :
+            type == osg::Shader::FRAGMENT ? "FRAGMENT" :
+            type == osg::Shader::GEOMETRY ? "GEOMETRY" :
+            type == osg::Shader::TESSCONTROL ? "TESSCONTROL" :
+            "TESSEVAL";
     }
 
     /**
     * Populates the specified Program with passed-in shaders.
     */
-    void addShadersToProgram(const VirtualProgram::ShaderVector&      shaders, 
-                             const VirtualProgram::AttribBindingList& attribBindings,
-                             const VirtualProgram::AttribAliasMap&    attribAliases,
-                             osg::Program*                            program,
-                             ShaderComp::StageMask                    stages)
+    void addShadersToProgram(
+        const VirtualProgram::ShaderVector&      shaders,
+        const VirtualProgram::AttribBindingList& attribBindings,
+        const VirtualProgram::AttribAliasMap&    attribAliases,
+        osg::Program*                            program,
+        VirtualProgram::StageMask                stages)
     {
-#ifdef USE_ATTRIB_ALIASES
-        // apply any vertex attribute aliases. But first, sort them from longest to shortest 
-        // so we don't get any overlap and bad replacements.
-        VirtualProgram::AttribAliasVector sortedAliases;
-        sortedAliases.reserve( attribAliases.size() );
-        sortedAliases.insert(sortedAliases.begin(), attribAliases.begin(), attribAliases.end());
-        std::sort( sortedAliases.begin(), sortedAliases.end(), s_attribAliasSortFunc );
-
-        for( VirtualProgram::ShaderVector::const_iterator i = shaders.begin(); i != shaders.end(); ++i )
+        if (s_mergeShaders)
         {
-            osg::Shader* shader = i->get();
-            applyAttributeAliases( shader, sortedAliases );
-        }
-#endif
+            ShaderMerger merger;
 
-        // merge the shaders if necessary.
-        if ( s_mergeShaders )
-        {
-            unsigned          vertVersion = 0;
-            std::string       vertSubversion = "";
-            HeaderMap         vertExtensions;
-            HeaderMap         vertPrecisions;
-            HeaderMap         vertDefblocks;
-            HeaderMap         vertStructs;
-            HeaderMap         vertHeaders;
-            HeaderMap         vertDeffuncs;
-            std::stringstream vertBody;
-
-            unsigned          fragVersion = 0;
-            std::string       fragSubversion = "";
-            HeaderMap         fragExtensions;
-            HeaderMap         fragPrecisions;
-            HeaderMap         fragDefblocks;
-            HeaderMap         fragStructs;
-            HeaderMap         fragHeaders;
-            HeaderMap         fragDeffuncs;
-            std::stringstream fragBody;
-
-            // parse the shaders, combining header lines and finding the highest version:
-            for( VirtualProgram::ShaderVector::const_iterator i = shaders.begin(); i != shaders.end(); ++i )
+            for (auto& shader : shaders)
             {
-                osg::Shader* s = i->get();
-                if ( shaderInStageMask(s, stages) )
+                if (shaderInStageMask(shader.get(), stages))
                 {
-                    if ( s->getType() == osg::Shader::VERTEX )
-                    {
-                        parseShaderForMerging( s->getShaderSource(), vertVersion, vertSubversion, vertExtensions, vertPrecisions, vertDefblocks, vertStructs, vertHeaders, vertDeffuncs, vertBody );
-                    }
-                    else if ( s->getType() == osg::Shader::FRAGMENT )
-                    {
-                        parseShaderForMerging( s->getShaderSource(), fragVersion, fragSubversion, fragExtensions, fragPrecisions, fragDefblocks, fragStructs, fragHeaders, fragDeffuncs, fragBody );
-                    }
+                    merger.add(shader.get());
                 }
             }
 
-            // write out the merged shader code:
-            std::string vertBodyText;
-            vertBodyText = vertBody.str();
-            std::stringstream vertShaderBuf;
-            if ( vertVersion > 0 ) {
-                vertShaderBuf << "#version " << vertVersion;
-                if(vertSubversion.size() > 0)
-                   vertShaderBuf << " " << vertSubversion;
-                vertShaderBuf << "\n";
-            }
+            merger.merge(program);
 
-#if __ANDROID__
-            vertShaderBuf << "#extension GL_EXT_shader_io_blocks : require\n";
-#endif
-            for( HeaderMap::const_iterator h = vertExtensions.begin(); h != vertExtensions.end(); ++h )
-                vertShaderBuf << h->second << "\n";
-
-            if(vertPrecisions.size() > 0) {
-                for(HeaderMap::iterator pitr = vertPrecisions.begin(); pitr != vertPrecisions.end(); ++pitr) {
-                    vertShaderBuf << "precision " << pitr->second << " " << pitr->first << "\n";
-                }
-            }
-            
-            for( HeaderMap::const_iterator h = vertDefblocks.begin(); h != vertDefblocks.end(); ++h )
-                vertShaderBuf << h->second << "\n";
-            
-            for( HeaderMap::const_iterator h = vertStructs.begin(); h != vertStructs.end(); ++h )
-                vertShaderBuf << h->second << "\n";
-
-            for( HeaderMap::const_iterator h = vertHeaders.begin(); h != vertHeaders.end(); ++h )
-                vertShaderBuf << h->second << "\n";
-            
-            for( HeaderMap::const_iterator h = vertDeffuncs.begin(); h != vertDeffuncs.end(); ++h )
-                vertShaderBuf << h->second << "\n";
-            
-            vertShaderBuf << vertBodyText << "\n";
-            vertBodyText = vertShaderBuf.str();
-
-
-
-            std::string fragBodyText;
-            fragBodyText = fragBody.str();
-            std::stringstream fragShaderBuf;
-            if ( fragVersion > 0 ) {
-                fragShaderBuf << "#version " << fragVersion;
-                if(fragSubversion.size() > 0)
-                    fragShaderBuf << " " << fragSubversion;
-                fragShaderBuf << "\n";
-            }
-
-#if defined(OSG_GLES3_AVAILABLE)
-    #if __ANDROID__
-            fragShaderBuf << "#extension GL_EXT_shader_io_blocks : require\n";
-    #endif
-
-            // ensure there's a default for floats in the frag shader
-            std::string& defaultFragFloat = fragPrecisions["float;"];
-            if(defaultFragFloat.size() == 0) defaultFragFloat = "highp";
-#endif
-
-            for( HeaderMap::const_iterator h = fragExtensions.begin(); h != fragExtensions.end(); ++h )
-                fragShaderBuf << h->second << "\n";
-
-            if(fragPrecisions.size() > 0) {
-                for(HeaderMap::iterator pitr = fragPrecisions.begin(); pitr != fragPrecisions.end(); ++pitr) {
-                    fragShaderBuf << "precision " << pitr->second << " " << pitr->first << "\n";
-                }
-            }
-            
-            for( HeaderMap::const_iterator h = fragDefblocks.begin(); h != fragDefblocks.end(); ++h )
-                fragShaderBuf << h->second << "\n";
-            
-            for( HeaderMap::const_iterator h = fragStructs.begin(); h != fragStructs.end(); ++h )
-                fragShaderBuf << h->second << "\n";
-
-            for( HeaderMap::const_iterator h = fragHeaders.begin(); h != fragHeaders.end(); ++h )
-                fragShaderBuf << h->second << "\n";
-            
-            for( HeaderMap::const_iterator h = fragDeffuncs.begin(); h != fragDeffuncs.end(); ++h )
-                fragShaderBuf << h->second << "\n";
-            
-            fragShaderBuf << fragBodyText << "\n";
-            fragBodyText = fragShaderBuf.str();
-
-
-            // add them to the program.
-            program->addShader( new osg::Shader(osg::Shader::VERTEX, vertBodyText) );
-            program->addShader( new osg::Shader(osg::Shader::FRAGMENT, fragBodyText) );
-
-            if ( s_dumpShaders )
+            if (s_dumpShaders)
             {
-                OE_NOTICE << LC
-                    << "\nMERGED VERTEX SHADER: \n\n" << vertBodyText << "\n\n"
-                    << "MERGED FRAGMENT SHADER: \n\n" << fragBodyText << "\n" << std::endl;
+                for (unsigned i = 0; i < program->getNumShaders(); ++i)
+                {
+                    osg::Shader* shader = program->getShader(i);
+                    OE_NOTICE << "\n---------MERGED "
+                        << getNameForType(shader->getType())
+                        << " SHADER------------\n"
+                        << shader->getShaderSource()
+                        << std::endl;
+                }
             }
         }
         else
         {
-            if ( !s_dumpShaders )
+            if (!s_dumpShaders)
             {
-                for( VirtualProgram::ShaderVector::const_iterator i = shaders.begin(); i != shaders.end(); ++i )
+                for (auto& shader : shaders)
                 {
-                    if ( shaderInStageMask(i->get(), stages) )
+                    if (shaderInStageMask(shader.get(), stages))
                     {
-                        program->addShader( i->get() );
+                        program->addShader(shader.get());
                     }
                 }
             }
@@ -749,24 +646,25 @@ namespace
 
                 int c = 1;
 
-                for( VirtualProgram::ShaderVector::const_iterator i = copy.begin(); i != copy.end(); ++i )
+                for (auto& shader : copy)
                 {
-                    if ( shaderInStageMask(i->get(), stages) )
+                    if (shaderInStageMask(shader.get(), stages))
                     {
-                        program->addShader( i->get() );
+                        program->addShader(shader.get());
 
-                        OE_NOTIFY(osg::NOTICE,"")
-                            << "--- [ " << (c++) << "/" << shaders.size() << " " << i->get()->getTypename() << " ] ------------------\n\n"
-                            << i->get()->getShaderSource() << std::endl;
+                        OE_NOTIFY(osg::NOTICE, "")
+                            << "--- [ " << (c++) << "/" << shaders.size() << " " 
+                            << shader.get()->getTypename() << " ] ------------------\n\n"
+                            << shader.get()->getShaderSource() << std::endl;
                     }
                 }
             }
         }
 
         // add the attribute bindings
-        for( VirtualProgram::AttribBindingList::const_iterator abl = attribBindings.begin(); abl != attribBindings.end(); ++abl )
+        for (auto& binding : attribBindings)
         {
-            program->addBindAttribLocation( abl->first, abl->second );
+            program->addBindAttribLocation(binding.first, binding.second);
         }
     }
 
@@ -775,62 +673,33 @@ namespace
     * Assemble a new OSG shader Program from the provided components.
     * Outputs the uniquely-identifying "key vector" and returns the new program.
     */
-    osg::Program* buildProgram(const std::string&                  programName,
-                               osg::State&                         state,
-                               ShaderComp::FunctionLocationMap&    accumFunctions,
-                               VirtualProgram::ShaderMap&          accumShaderMap,
-                               const VirtualProgram::ExtensionsSet& extensionsSet,
-                               VirtualProgram::AttribBindingList&  accumAttribBindings,
-                               VirtualProgram::AttribAliasMap&     accumAttribAliases,
-                               osg::Program*                       templateProgram,
-                               ProgramKey&                         outputKey)
+    osg::Program* buildProgram(
+        const std::string&                  programName,
+        osg::State&                         state,
+        VirtualProgram::FunctionLocationMap& accumFunctions,
+        VirtualProgram::ShaderMap&          accumShaderMap,
+        const VirtualProgram::ExtensionsSet& extensionsSet,
+        VirtualProgram::AttribBindingList&  accumAttribBindings,
+        VirtualProgram::AttribAliasMap&     accumAttribAliases,
+        osg::Program*                       templateProgram,
+        ProgramRepo::Key&                   outputKey)
     {
-
-#ifdef DEBUG_ACCUMULATION
-
-        // test dump .. function map and shader map should always include identical data.
-        OE_INFO << LC << "===PROGRAM: " << programName << "\n";
-
-        // debug:
-        OE_INFO << LC << "====FUNCTIONS:\n";
-
-        for(ShaderComp::FunctionLocationMap::iterator i = accumFunctions.begin();
-            i != accumFunctions.end();
-            ++i)
-        {
-            ShaderComp::OrderedFunctionMap& ofm = i->second;
-            for(ShaderComp::OrderedFunctionMap::iterator j = ofm.begin(); j != ofm.end(); ++j)
-            {
-                OE_INFO << LC 
-                    << j->second._name << ", " << (j->second.accept(state)?"accepted":"rejected")
-                    << std::endl;
-            }
-        }
-
-        OE_INFO << LC << "====SHADERS:\n";
-        for(VirtualProgram::ShaderMap::iterator i = accumShaderMap.begin();
-            i != accumShaderMap.end();
-            ++i)
-        {
-            OE_INFO << LC
-                << i->first << ", "
-                << (i->second.accept(state)?"accepted":"rejected") << ", "
-                << i->second._overrideValue
-                << std::endl;
-        }
-        OE_INFO << LC << "\n\n";
-#endif
-
         // create new MAINs for this function stack.
         VirtualProgram::ShaderVector mains;
-        ShaderComp::StageMask stages = Registry::shaderFactory()->createMains(accumFunctions, accumShaderMap, extensionsSet, mains);
+
+        VirtualProgram::StageMask stages = Registry::shaderFactory()->createMains(
+            state,
+            accumFunctions,
+            accumShaderMap,
+            extensionsSet,
+            mains);
 
         // build a new "key vector" now that we've changed the shader map.
         // we call is a key vector because it uniquely identifies this shader program
         // based on its accumlated function set.
-        for( VirtualProgram::ShaderMap::iterator i = accumShaderMap.begin(); i != accumShaderMap.end(); ++i )
+        for(auto& iter : accumShaderMap)
         {
-            outputKey.push_back( i->data()._shader.get() );
+            outputKey.insert(iter.second._shader->getHash());
         }
 
         // finally, add the mains (AFTER building the key vector .. we don't want or
@@ -838,16 +707,18 @@ namespace
         // other elements of the key vector.)
 
         VirtualProgram::ShaderVector buildVector;
-        buildVector.reserve( accumShaderMap.size() + mains.size() );
+        buildVector.reserve(accumShaderMap.size() + mains.size());
 
-        for(ProgramKey::iterator i = outputKey.begin(); i != outputKey.end(); ++i)
-            buildVector.push_back( (*i)->getShader(stages) );
-
-        buildVector.insert( buildVector.end(), mains.begin(), mains.end() );
-
-        if ( s_dumpShaders )
+        for (auto& iter : accumShaderMap)
         {
-            if ( !programName.empty() )
+            buildVector.push_back(iter.second._shader->getShader(stages));
+        }
+
+        buildVector.insert(buildVector.end(), mains.begin(), mains.end());
+
+        if (s_dumpShaders)
+        {
+            if (!programName.empty())
             {
                 OE_NOTICE << LC << "\n\n=== [ Program \"" << programName << "\" ] =============================\n\n" << std::endl;
             }
@@ -859,9 +730,9 @@ namespace
 
         // Create the new program.
         osg::Program* program = new osg::Program();
-        program->setName( programName );
-        addShadersToProgram( buildVector, accumAttribBindings, accumAttribAliases, program, stages );
-        addTemplateDataToProgram( templateProgram, program );
+        program->setName(programName);
+        addShadersToProgram(buildVector, accumAttribBindings, accumAttribAliases, program, stages);
+        addTemplateDataToProgram(templateProgram, program);
 
         return program;
     }
@@ -869,70 +740,16 @@ namespace
 
 //------------------------------------------------------------------------
 
-void
-VirtualProgram::AttrStackMemory::remember(const osg::State&                 state,
-                                          const VirtualProgram::AttrStack&  rhs,
-                                          osg::Program*                     program)
+bool VirtualProgram::_gldebug = false;
+void VirtualProgram::enableGLDebugging()
 {
-    if ( state.getFrameStamp() )
-    {
-        unsigned contextID = state.getContextID();
-        Item& item = _item[contextID];
-        item.frameNumber = state.getFrameStamp()->getFrameNumber();
-        item.attrStack = rhs;
-        item.program = program;
-    }
-}
-
-osg::Program*
-VirtualProgram::AttrStackMemory::recall(const osg::State&                 state,
-                                        const VirtualProgram::AttrStack&  rhs)
-{
-    osg::Program* program = 0L;
-
-    const osg::FrameStamp* fs = state.getFrameStamp();
-    if ( fs )
-    {
-        unsigned contextID = state.getContextID();
-        Item& item = _item[contextID];
-
-        // check frame number:
-        if ( item.program.valid() && item.frameNumber == fs->getFrameNumber() )
-        {
-            // same, how compare the attribute stacks:
-            if ( item.attrStack.size() == rhs.size() )
-            {
-                bool arraysMatch = true;
-                for(int i=0; i<item.attrStack.size() && arraysMatch; ++i)
-                {
-                    if (item.attrStack[i] != rhs[i])
-                    {
-                        arraysMatch = false;
-                    }
-                }
-
-                if (arraysMatch)
-                {
-                    program = item.program.get();
-                }
-            }
-        }
-
-        if ( !program )
-        {
-            item.frameNumber = fs->getFrameNumber();
-            item.attrStack = rhs;
-            item.program = 0L;
-        }
-    }
-
-    return program;
+    _gldebug = true;
 }
 
 //------------------------------------------------------------------------
 
 VirtualProgram::ShaderEntry::ShaderEntry() :
-_overrideValue(0)
+    _overrideValue(0)
 {
     //nop
 }
@@ -946,10 +763,16 @@ VirtualProgram::ShaderEntry::accept(const osg::State& state) const
 bool
 VirtualProgram::ShaderEntry::operator < (const VirtualProgram::ShaderEntry& rhs) const
 {
-    if ( _shader->getShaderSource().compare(rhs._shader->getShaderSource()) < 0 ) return true;
-    //if ( _shader->compare(*rhs._shader.get()) < 0 ) return true;
-    if ( _overrideValue < rhs._overrideValue ) return true;
-    if ( _accept.valid() && !rhs._accept.valid() ) return true;
+    int c = _shader->getShaderSource().compare(rhs._shader->getShaderSource());
+    if (c < 0) return true;
+    if (c > 0) return false;
+
+    if (_shader->getShaderSource().compare(rhs._shader->getShaderSource()) < 0) return true;
+
+    if (_overrideValue < rhs._overrideValue) return true;
+    if (_overrideValue > rhs._overrideValue) return false;
+
+    if (_accept.valid() && !rhs._accept.valid()) return true;
     return false;
 }
 
@@ -958,61 +781,63 @@ VirtualProgram::ShaderEntry::operator < (const VirtualProgram::ShaderEntry& rhs)
 // same type as PROGRAM (for proper state sorting)
 const osg::StateAttribute::Type VirtualProgram::SA_TYPE = osg::StateAttribute::PROGRAM;
 
-VirtualProgram* 
+VirtualProgram*
 VirtualProgram::getOrCreate(osg::StateSet* stateset)
 {
-    if ( !stateset )
+    if (!stateset)
         return 0L;
 
-    VirtualProgram* vp = dynamic_cast<VirtualProgram*>( stateset->getAttribute(SA_TYPE) );
-    if ( !vp )
+    VirtualProgram* vp = dynamic_cast<VirtualProgram*>(stateset->getAttribute(SA_TYPE));
+    if (!vp)
     {
         vp = new VirtualProgram();
-        vp->setInheritShaders(true);
-        stateset->setAttributeAndModes( vp, osg::StateAttribute::ON );
+        vp->_inherit = true;
+        vp->_inheritSet = true;
+        vp->setName(stateset->getName());
+        stateset->setAttributeAndModes(vp, osg::StateAttribute::ON);
     }
     return vp;
 }
 
-VirtualProgram* 
+VirtualProgram*
 VirtualProgram::get(osg::StateSet* stateset)
 {
-    if ( !stateset )
+    if (!stateset)
         return 0L;
 
-    return dynamic_cast<VirtualProgram*>( stateset->getAttribute(SA_TYPE) );
+    return dynamic_cast<VirtualProgram*>(stateset->getAttribute(SA_TYPE));
 }
 
-const VirtualProgram* 
+const VirtualProgram*
 VirtualProgram::get(const osg::StateSet* stateset)
 {
-    if ( !stateset )
+    if (!stateset)
         return 0L;
 
-    return dynamic_cast<const VirtualProgram*>( stateset->getAttribute(SA_TYPE) );
+    return dynamic_cast<const VirtualProgram*>(stateset->getAttribute(SA_TYPE));
 }
 
 VirtualProgram*
 VirtualProgram::cloneOrCreate(const osg::StateSet* src, osg::StateSet* dest)
 {
-    if ( !dest )
+    if (!dest)
         return 0L;
 
     const VirtualProgram* vp = 0L;
 
-    if ( src )
+    if (src)
     {
-        vp = get( src );
+        vp = get(src);
     }
 
-    if ( !vp )
+    if (!vp)
     {
-        return getOrCreate( dest );
+        return getOrCreate(dest);
     }
 
     else
     {
-        VirtualProgram* cloneVP = osg::clone( vp, osg::CopyOp::DEEP_COPY_ALL );
+        VirtualProgram* cloneVP = osg::clone(vp, osg::CopyOp::DEEP_COPY_ALL);
         cloneVP->setInheritShaders(true);
         dest->setAttributeAndModes(cloneVP, osg::StateAttribute::ON);
         return cloneVP;
@@ -1025,36 +850,48 @@ VirtualProgram::cloneOrCreate(osg::StateSet* stateset)
     return cloneOrCreate(stateset, stateset);
 }
 
+void
+VirtualProgram::setReleaseUnusedPrograms(bool value)
+{
+    Registry::programRepo().setReleaseUnusedPrograms(value);
+}
+
+void
+VirtualProgram::setProgramBinaryCacheLocation(const std::string& folder)
+{
+    Registry::programRepo().setProgramBinaryCacheLocation(folder);
+}
+
 //------------------------------------------------------------------------
 
-VirtualProgram::VirtualProgram( unsigned mask ) : 
-_mask              ( mask ),
-_active            ( true ),
-_inherit           ( true ),
-_inheritSet        ( false ),
-_logShaders        ( false ),
-_logPath           ( "" ),
-_acceptCallbacksVaryPerFrame( false ),
-_isAbstract        ( false )
+VirtualProgram::VirtualProgram(unsigned mask) :
+    _mask(mask),
+    _active(true),
+    _inherit(true),
+    _inheritSet(false),
+    _logShaders(false),
+    _logPath(""),
+    _acceptCallbacksVaryPerFrame(false),
+    _isAbstract(false)
 {
     // Note: we cannot set _active here. Wait until apply().
     // It will cause a conflict in the Registry.
 
-    _id = osgEarth::Registry::instance()->createUID();
+    _id = osgEarth::createUID();
 
     // check the the dump env var
-    if ( ::getenv(OSGEARTH_DUMP_SHADERS) != 0L )
+    if (::getenv(OSGEARTH_DUMP_SHADERS) != 0L)
     {
         s_dumpShaders = true;
     }
 
     // check the merge env var
-    if ( ::getenv(OSGEARTH_MERGE_SHADERS) != 0L )
+    if (::getenv(OSGEARTH_MERGE_SHADERS) != 0L)
     {
         s_mergeShaders = true;
     }
 
-    if ( ::getenv(OSGEARTH_DISABLE_GLRELEASE) != 0L)
+    if (::getenv(OSGEARTH_DISABLE_GLRELEASE) != 0L)
     {
         s_disableVPRelease = true;
     }
@@ -1072,50 +909,49 @@ _isAbstract        ( false )
     _apply.resize(MAX_CONTEXTS);
 #endif
 
-#ifdef USE_STACK_MEMORY
-    _vpStackMemory._item.resize(MAX_CONTEXTS);
+#if 0 // Good, but needs more testing
+#ifdef OSGEARTH_SINGLE_THREADED_OSG
+    _useDataModelMutex = false;
+#endif
 #endif
 }
 
 
-VirtualProgram::VirtualProgram(const VirtualProgram& rhs, const osg::CopyOp& copyop ) :
-osg::StateAttribute( rhs, copyop ),
-_shaderMap         ( rhs._shaderMap ),
-_mask              ( rhs._mask ),
-_functions         ( rhs._functions ),
-_inherit           ( rhs._inherit ),
-_inheritSet        ( rhs._inheritSet ),
-_logShaders        ( rhs._logShaders ),
-_logPath           ( rhs._logPath ),
-_template          ( osg::clone(rhs._template.get()) ),
-_acceptCallbacksVaryPerFrame( rhs._acceptCallbacksVaryPerFrame ),
-_isAbstract        ( rhs._isAbstract )
-{    
-    _id = osgEarth::Registry::instance()->createUID();
+VirtualProgram::VirtualProgram(const VirtualProgram& rhs, const osg::CopyOp& copyop) :
+    osg::StateAttribute(rhs, copyop),
+    _shaderMap(rhs._shaderMap),
+    _mask(rhs._mask),
+    _functions(rhs._functions),
+    _inherit(rhs._inherit),
+    _inheritSet(rhs._inheritSet),
+    _logShaders(rhs._logShaders),
+    _logPath(rhs._logPath),
+    _template(osg::clone(rhs._template.get())),
+    _acceptCallbacksVaryPerFrame(rhs._acceptCallbacksVaryPerFrame),
+    _isAbstract(rhs._isAbstract)
+
+{
+    _id = osgEarth::createUID();
 
     // Attribute bindings.
-    const osg::Program::AttribBindingList &abl = rhs.getAttribBindingList();
-    for( osg::Program::AttribBindingList::const_iterator attribute = abl.begin(); attribute != abl.end(); ++attribute )
+    for(auto& binding : rhs.getAttribBindingList())
     {
-        addBindAttribLocation( attribute->first, attribute->second );
+        addBindAttribLocation(binding.first, binding.second);
     }
 
 
 #ifdef USE_LAST_USED_PROGRAM
     _lastUsedProgram.resize(MAX_CONTEXTS);
 #endif
-    
+
 #ifdef PREALLOCATE_APPLY_VARS
     _apply.resize(MAX_CONTEXTS);
-#endif
-
-#ifdef USE_STACK_MEMORY
-    _vpStackMemory._item.resize(MAX_CONTEXTS);
 #endif
 }
 
 VirtualProgram::~VirtualProgram()
 {
+
 #ifdef USE_PROGRAM_REPO
     if (Registry::instance())
     {
@@ -1133,88 +969,32 @@ VirtualProgram::compare(const osg::StateAttribute& sa) const
 {
     // check the types are equal and then create the rhs variable
     // used by the COMPARE_StateAttribute_Parameter macros below.
-    COMPARE_StateAttribute_Types(VirtualProgram,sa);
+    COMPARE_StateAttribute_Types(VirtualProgram, sa);
 
-    // compare each parameter in turn against the rhs.
-    COMPARE_StateAttribute_Parameter(_mask);
-    COMPARE_StateAttribute_Parameter(_inherit);
-    COMPARE_StateAttribute_Parameter(_isAbstract);
-
-    // compare the shader maps. Need to lock them while comparing.
-    {
-        //Threading::ScopedReadLock shared( _dataModelMutex );
-        Threading::ScopedMutexLock lock( _dataModelMutex );
-        
-        if ( _shaderMap.size() < rhs._shaderMap.size() ) return -1;
-        if ( _shaderMap.size() > rhs._shaderMap.size() ) return 1;
-
-        ShaderMap::const_iterator lhsIter = _shaderMap.begin();
-        ShaderMap::const_iterator rhsIter = rhs._shaderMap.begin();
-
-        while( lhsIter != _shaderMap.end() )
-        {
-            //int keyCompare = lhsIter->key().compare( rhsIter->key() );
-            //if ( keyCompare != 0 ) return keyCompare;
-
-            if ( lhsIter->key() < rhsIter->key() ) return -1;
-            if ( lhsIter->key() > rhsIter->key() ) return  1;
-
-            const ShaderEntry& lhsEntry = lhsIter->data(); //lhsIter->second;
-            const ShaderEntry& rhsEntry = rhsIter->data(); //rhsIter->second;
-
-            if ( lhsEntry < rhsEntry ) return -1;
-            if ( rhsEntry < lhsEntry ) return  1;
-
-            lhsIter++;
-            rhsIter++;
-        }
-
-        // compare the template settings.
-        int templateCompare = _template->compare( *(rhs.getTemplate()) );
-        if ( templateCompare != 0 ) return templateCompare;
-    }
-
-    return 0; // passed all the above comparison macros, must be equal.
+    // Safely compare the objects. Note, this function 
+    // treats the argument as the RHS, so we need to invert
+    // the result before returning it since the argument is
+    // actually our LHS.
+    return -rhs.compare_safe(*this);
 }
 
 void
-VirtualProgram::addBindAttribLocation( const std::string& name, GLuint index )
+VirtualProgram::addBindAttribLocation(const std::string& name, GLuint index)
 {
-    //Threading::ScopedWriteLock exclusive( _dataModelMutex );
-    _dataModelMutex.lock();
-
-#ifdef USE_ATTRIB_ALIASES
-    _attribAliases[name] = Stringify() << "oe_attrib_" << index;
-    _attribBindingList[_attribAliases[name]] = index;
-#else
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
     _attribBindingList[name] = index;
-#endif
-
-    _dataModelMutex.unlock();
 }
 
 void
-VirtualProgram::removeBindAttribLocation( const std::string& name )
+VirtualProgram::removeBindAttribLocation(const std::string& name)
 {
-    //Threading::ScopedWriteLock exclusive( _dataModelMutex );
-    _dataModelMutex.lock();
-
-#ifdef USE_ATTRIB_ALIASES
-    std::map<std::string,std::string>::iterator i = _attribAliases.find(name);
-    if ( i != _attribAliases.end() )
-        _attribBindingList.erase(i->second);
-#else
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
     _attribBindingList.erase(name);
-#endif
-
-    _dataModelMutex.unlock();
 }
 
 void
 VirtualProgram::compileGLObjects(osg::State& state) const
 {
-    //OE_INFO << LC << "VirtualProgram::compileGLObjects (" << (this) << ")" << std::endl;
-
     // Don't do this here. compileGLObjects() runs from a pre-compilation visitor,
     // and the state is not complete enough to create fully formed programs; so
     // this is not only pointless but can result in shader linkage errors 
@@ -1232,11 +1012,11 @@ VirtualProgram::resizeGLObjectBuffers(unsigned maxSize)
 #endif
 
     // Resize shaders in the PolyShader
-    for( ShaderMap::iterator i = _shaderMap.begin(); i != _shaderMap.end(); ++i )
+    for (ShaderMap::iterator i = _shaderMap.begin(); i != _shaderMap.end(); ++i)
     {
-        if (i->data()._shader.valid())
+        if (i->second._shader.valid())
         {
-            i->data()._shader->resizeGLObjectBuffers(maxSize);
+            i->second._shader->resizeGLObjectBuffers(maxSize);
         }
     }
 }
@@ -1248,7 +1028,7 @@ VirtualProgram::releaseGLObjects(osg::State* state) const
         return;
 
     OE_TEST << LC << "VP::RGLO (" << _id << ") " << getName() << " (" << (_lastUsedProgram[0].get()) << ") state=" << (uintptr_t)state << std::endl;
-    
+
 #ifdef USE_PROGRAM_REPO
     Registry::programRepo().lock();
     Registry::programRepo().release(_id, state);
@@ -1258,13 +1038,14 @@ VirtualProgram::releaseGLObjects(osg::State* state) const
 #ifdef USE_LAST_USED_PROGRAM
     if (state)
     {
-        const osg::Program* p = _lastUsedProgram[state->getContextID()].get();
+        auto cid = GLUtils::getSharedContextID(*state);
+        const osg::Program* p = _lastUsedProgram[cid].get();
         if (p)
             p->releaseGLObjects(state);
     }
     else
     {
-        for(unsigned i=0; i<_lastUsedProgram.size(); ++i)
+        for (unsigned i = 0; i < _lastUsedProgram.size(); ++i)
         {
             const osg::Program* p = _lastUsedProgram[i].get();
             if (p)
@@ -1272,52 +1053,49 @@ VirtualProgram::releaseGLObjects(osg::State* state) const
         }
     }
     _lastUsedProgram.setAllElementsTo(NULL);
-
 #endif
 }
 
-PolyShader*
+VirtualProgram::PolyShader*
 VirtualProgram::getPolyShader(const std::string& shaderID) const
 {
-    Threading::ScopedMutexLock readonly( _dataModelMutex );
-    const ShaderEntry* entry = _shaderMap.find( MAKE_SHADER_ID(shaderID) );
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
+    ShaderMap::const_iterator i = _shaderMap.find(MAKE_SHADER_ID(shaderID));
+    const ShaderEntry* entry = i != _shaderMap.end() ? &i->second : NULL;
     return entry ? entry->_shader.get() : 0L;
 }
 
 
 osg::Shader*
-VirtualProgram::setShader(const std::string&                 shaderID,
-                          osg::Shader*                       shader,
-                          osg::StateAttribute::OverrideValue ov)
+VirtualProgram::setShader(
+    const std::string& shaderID,
+    osg::Shader* shader,
+    osg::StateAttribute::OverrideValue ov)
 {
-    if ( !shader || shader->getType() ==  osg::Shader::UNDEFINED ) 
+    if (!shader || shader->getType() == osg::Shader::UNDEFINED)
         return NULL;
 
     // set the inherit flag if it's not initialized
-    if ( !_inheritSet )
+    if (!_inheritSet)
     {
-        setInheritShaders( true );
+        setInheritShaders(true);
     }
 
     checkSharing();
 
     // set the name to the ID:
-    shader->setName( shaderID );
+    shader->setName(shaderID);
 
-    PolyShader* pshader = new PolyShader( shader );
+    PolyShader* pshader = new PolyShader(shader);
     pshader->prepare();
 
     // lock the data model and insert the new shader.
     {
-        _dataModelMutex.lock();
-        //Threading::ScopedWriteLock exclusive( _dataModelMutex );
-
+        scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
         ShaderEntry& entry = _shaderMap[MAKE_SHADER_ID(shaderID)];
-        entry._shader        = pshader;
+        entry._shader = pshader;
         entry._overrideValue = ov;
-        entry._accept        = 0L;
-
-        _dataModelMutex.unlock();
+        entry._accept = nullptr;
     }
 
     return shader;
@@ -1325,22 +1103,23 @@ VirtualProgram::setShader(const std::string&                 shaderID,
 
 
 osg::Shader*
-VirtualProgram::setShader(osg::Shader*                       shader,
-                          osg::StateAttribute::OverrideValue ov)
+VirtualProgram::setShader(
+    osg::Shader* shader,
+    osg::StateAttribute::OverrideValue ov)
 {
-    if ( !shader || shader->getType() == osg::Shader::UNDEFINED )
+    if (!shader || shader->getType() == osg::Shader::UNDEFINED)
         return NULL;
 
-    if ( shader->getName().empty() )
+    if (shader->getName().empty())
     {
         OE_WARN << LC << "setShader called but the shader name is not set" << std::endl;
         return 0L;
     }
 
     // set the inherit flag if it's not initialized
-    if ( !_inheritSet )
+    if (!_inheritSet)
     {
-        setInheritShaders( true );
+        setInheritShaders(true);
     }
 
     PolyShader* pshader = new PolyShader(shader);
@@ -1348,16 +1127,14 @@ VirtualProgram::setShader(osg::Shader*                       shader,
 
     // lock the data model while changing it.
     {
-        _dataModelMutex.lock();
+        scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
 
         checkSharing();
 
         ShaderEntry& entry = _shaderMap[MAKE_SHADER_ID(shader->getName())];
-        entry._shader        = pshader;
+        entry._shader = pshader;
         entry._overrideValue = ov;
-        entry._accept        = 0L;
-
-        _dataModelMutex.unlock();
+        entry._accept = nullptr;
     }
 
     return shader;
@@ -1365,44 +1142,46 @@ VirtualProgram::setShader(osg::Shader*                       shader,
 
 
 void
-VirtualProgram::setFunction(const std::string&           functionName,
-                            const std::string&           shaderSource,
-                            ShaderComp::FunctionLocation location,
-                            float                        ordering)
+VirtualProgram::setFunction(
+    const std::string& functionName,
+    const std::string& shaderSource,
+    FunctionLocation location,
+    float ordering)
 {
-    setFunction(functionName, shaderSource, location, 0L, ordering);
+    setFunction(functionName, shaderSource, location, nullptr, ordering);
 }
 
 void
-VirtualProgram::setFunction(const std::string&           functionName,
-                            const std::string&           shaderSource,
-                            ShaderComp::FunctionLocation location,
-                            ShaderComp::AcceptCallback*  accept,
-                            float                        ordering)
+VirtualProgram::setFunction(
+    const std::string& functionName,
+    const std::string& shaderSource,
+    FunctionLocation location,
+    AcceptCallback*  accept,
+    float ordering)
 {
     // set the inherit flag if it's not initialized
-    if ( !_inheritSet )
+    if (!_inheritSet)
     {
-        setInheritShaders( true );
+        setInheritShaders(true);
     }
 
     // lock the functions map while iterating and then modifying it:
     {
-        _dataModelMutex.lock();
+        scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
 
         checkSharing();
 
         OrderedFunctionMap& ofm = _functions[location];
 
         // if there's already a function by this name, remove it
-        for( OrderedFunctionMap::iterator i = ofm.begin(); i != ofm.end(); )
+        for (OrderedFunctionMap::iterator i = ofm.begin(); i != ofm.end(); )
         {
-            ShaderComp::Function& f = i->second;
-            if ( f._name.compare(functionName) == 0 )
+            Function& f = i->second;
+            if (f._name.compare(functionName) == 0)
             {
                 OrderedFunctionMap::iterator j = i;
                 ++j;
-                ofm.erase( i );
+                ofm.erase(i);
                 i = j;
             }
             else
@@ -1410,86 +1189,73 @@ VirtualProgram::setFunction(const std::string&           functionName,
                 ++i;
             }
         }
-        
-        ShaderComp::Function function;
-        function._name   = functionName;
+
+        Function function;
+        function._name = functionName;
         function._accept = accept;
-        ofm.insert( OrderedFunction(ordering, function) );
+        ofm.insert(OrderedFunction(ordering, function));
+
+        // final cleanup on the shader source before applying it
+        std::string finalized_source(shaderSource);
+        ShaderLoader::finalize(finalized_source);
 
         // assemble the poly shader. but check a map first for existing shaders.
-        PolyShader* shader = PolyShader::lookUpShader(functionName, shaderSource, location);
-      
-        ShaderEntry& entry = _shaderMap[MAKE_SHADER_ID(functionName)];
-        entry._shader        = shader;
-        entry._overrideValue = osg::StateAttribute::ON;
-        entry._accept        = accept;
+        PolyShader* shader = PolyShader::lookUpShader(functionName, finalized_source, location);
 
-        _dataModelMutex.unlock();
+        ShaderEntry& entry = _shaderMap[MAKE_SHADER_ID(functionName)];
+        entry._shader = shader;
+        entry._overrideValue = osg::StateAttribute::ON;
+        entry._accept = accept;
 
     } // release lock
-}
-
-void 
-VirtualProgram::setFunctionMinRange(const std::string& name, float minRange)
-{
-    OE_DEPRECATED(VirtualProgram::setFunctionMinRange, shaders) << std::endl;
-}
-
-void 
-VirtualProgram::setFunctionMaxRange(const std::string& name, float maxRange)
-{
-    OE_DEPRECATED(VirtualProgram::setFunctionMaxRange, shaders) << std::endl;
 }
 
 bool
 VirtualProgram::addGLSLExtension(const std::string& extension)
 {
-   _dataModelMutex.lock();
-   std::pair<std::set<std::string>::const_iterator, bool> insertPair = _globalExtensions.insert(extension);
-   _dataModelMutex.unlock();
-   return insertPair.second;
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
+    std::pair<ExtensionsSet::const_iterator, bool> insertPair = _globalExtensions.insert(extension);
+    return insertPair.second;
 }
 
 bool
 VirtualProgram::hasGLSLExtension(const std::string& extension) const
 {
-   _dataModelMutex.lock();
-   bool doesHave = _globalExtensions.find(extension)!=_globalExtensions.end();
-   _dataModelMutex.unlock();
-   return doesHave;
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
+    bool doesHave = _globalExtensions.find(extension) != _globalExtensions.end();
+    return doesHave;
 }
 
 bool
 VirtualProgram::removeGLSLExtension(const std::string& extension)
 {
-   _dataModelMutex.lock();
-   int erased = _globalExtensions.erase(extension);
-   _dataModelMutex.unlock();
-   return erased > 0;
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
+    ExtensionsSet::size_type erased = _globalExtensions.erase(extension);
+    return erased > 0;
 }
 
 void
-VirtualProgram::removeShader( const std::string& shaderID )
+VirtualProgram::removeShader(const std::string& shaderID)
 {
-    // lock the functions map while making changes:
-    Threading::ScopedMutexLock exclusive( _dataModelMutex );
+    // lock te functions map while making changes:
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
 
-    _shaderMap.erase( MAKE_SHADER_ID(shaderID) );
+    _shaderMap.erase(MAKE_SHADER_ID(shaderID));
 
-    for(FunctionLocationMap::iterator i = _functions.begin(); i != _functions.end(); ++i )
+    for (FunctionLocationMap::iterator i = _functions.begin(); i != _functions.end(); ++i)
     {
         OrderedFunctionMap& ofm = i->second;
-        for( OrderedFunctionMap::iterator j = ofm.begin(); j != ofm.end(); ++j )
+        for (OrderedFunctionMap::iterator j = ofm.begin(); j != ofm.end(); ++j)
         {
-            if ( j->second._name.compare(shaderID) == 0 )
+            if (j->second._name.compare(shaderID) == 0)
             {
-                ofm.erase( j );
+                ofm.erase(j);
 
                 // if the function map for this location is now empty,
                 // remove the location map altogether.
-                if ( ofm.size() == 0 )
+                if (ofm.size() == 0)
                 {
-                    _functions.erase( i );
+                    _functions.erase(i);
                 }
                 return;
             }
@@ -1499,9 +1265,9 @@ VirtualProgram::removeShader( const std::string& shaderID )
 
 
 void
-VirtualProgram::setInheritShaders( bool value )
+VirtualProgram::setInheritShaders(bool value)
 {
-    if ( _inherit != value || !_inheritSet )
+    if (_inherit != value || !_inheritSet)
     {
         _inherit = value;
 
@@ -1514,13 +1280,14 @@ VirtualProgram::setInheritShaders( bool value )
         }
 #endif
 
+
         _inheritSet = true;
     }
 }
 
 
 void
-VirtualProgram::apply( osg::State& state ) const
+VirtualProgram::apply(osg::State& state) const
 {
     OE_TEST << LC << "Applying (" << this << ") " << getName() << std::endl;
 
@@ -1528,7 +1295,7 @@ VirtualProgram::apply( osg::State& state ) const
     {
         return;
     }
-    else if ( !_active.isSet() )
+    else if (!_active.isSet())
     {
         // cannot use capabilities here; it breaks serialization.
         _active = true; //Registry::capabilities().supportsGLSL();
@@ -1539,8 +1306,8 @@ VirtualProgram::apply( osg::State& state ) const
     {
         return;
     }
-    
-    const unsigned contextID = state.getContextID();
+
+    const unsigned contextID = GLUtils::getSharedContextID(state);
 
     if (_shaderMap.empty() && !_inheritSet)
     {
@@ -1556,15 +1323,21 @@ VirtualProgram::apply( osg::State& state ) const
 
         //if ( state.getLastAppliedProgramObject() != 0L )
         {
-            const osg::GL2Extensions* extensions = osg::GL2Extensions::Get(contextID,true);
-            extensions->glUseProgram( 0 );
+            const osg::GL2Extensions* extensions = osg::GL2Extensions::Get(contextID, false);
+            if (extensions)
+            {
+                extensions->glUseProgram(0);
+            }
             state.setLastAppliedProgramObject(0);
         }
         return;
     }
 
     osg::ref_ptr<osg::Program> program;
-    
+
+    OE_PROFILING_ZONE_NAMED("vp:apply");
+    OE_PROFILING_ZONE_TEXT(getName());
+
     // Negate osg::State's last-attribute-applied tracking for 
     // VirtualProgram, since it cannot detect a VP that is reached from
     // different node/attribute paths. We replace this with the 
@@ -1573,22 +1346,13 @@ VirtualProgram::apply( osg::State& state ) const
     // the same an identical attribute stack.
     state.haveAppliedAttribute(this->SA_TYPE);
 
-#ifdef USE_STACK_MEMORY
-    bool programRecalled = false;
-    const AttrStack* stack = StateEx::getProgramStack(state);
-    if ( stack)
-    {
-        program = _vpStackMemory.recall(state, *stack);
-        programRecalled = program.valid();
-    }
-#endif // USE_STACK_MEMORY
-    
     // We need to tracks whether there are any accept callbacks, because if so
     // we cannot store the program in stack memory -- the accept callback can
     // exclude shaders based on any condition.
     bool acceptCallbacksVary = _acceptCallbacksVaryPerFrame;
+    ProgramRepo::Key key;
 
-    if ( !program.valid() )
+    if (!program.valid())
     {
 #ifdef PREALLOCATE_APPLY_VARS
         // Access the resuable shader map for this context. Bypasses reallocation overhead.
@@ -1598,13 +1362,14 @@ VirtualProgram::apply( osg::State& state ) const
         local.accumAttribBindings.clear();
         local.accumAttribAliases.clear();
         local.programKey.clear();
+        local.accumExtensions.clear();
 #else
         ApplyVars local;
 #endif
-    
+
         // If we are inheriting, build the active shader map up to this point
         // (but not including this VP).
-        if ( _inherit )
+        if (_inherit)
         {
             accumulateShaders(
                 state,
@@ -1612,41 +1377,44 @@ VirtualProgram::apply( osg::State& state ) const
                 local.accumShaderMap,
                 local.accumAttribBindings,
                 local.accumAttribAliases,
+                local.accumExtensions,
                 acceptCallbacksVary);
         }
-        
-        // Next, add the shaders from this VP.
-        {
-            _dataModelMutex.lock();
 
-            for( ShaderMap::const_iterator i = _shaderMap.begin(); i != _shaderMap.end(); ++i )
+        // Next, add the data from this VP.
+        {
+            scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
+
+            for (auto& iter : _shaderMap)
             {
-                if ( i->data().accept(state) )
+                if (iter.second.accept(state))
                 {
-                    addToAccumulatedMap( local.accumShaderMap, i->key(), i->data() );
+                    addToAccumulatedMap(local.accumShaderMap, iter.first, iter.second);
                 }
             }
 
             const AttribBindingList& abl = this->getAttribBindingList();
-            local.accumAttribBindings.insert( abl.begin(), abl.end() );
+            local.accumAttribBindings.insert(abl.begin(), abl.end());
 
-    #ifdef USE_ATTRIB_ALIASES
-            const AttribAliasMap& aliases = this->getAttribAliases();
-            local.accumAttribAliases.insert( aliases.begin(), aliases.end() );
-    #endif
-            
-            _dataModelMutex.unlock();
+            local.accumExtensions.insert(_globalExtensions.begin(), _globalExtensions.end());
         }
 
         // next, assemble a list of the shaders in the map so we can use it as our
-        // program cache key.
-        // (Note: at present, the "cache key" does not include any information on the vertex
+        // program repo key.
+        // (Note: at present, the KEY does not include any information on the vertex
         // attribute bindings. Technically it should, but in practice this might not be an
         // issue; it is unlikely one would have two identical shader programs with different
         // bindings.)
-        for( ShaderMap::iterator i = local.accumShaderMap.begin(); i != local.accumShaderMap.end(); ++i )
+        // We're also going to detect the precense of a fragment shader.
+        unsigned numFragShaders = 0u;
+        for (auto& iter : local.accumShaderMap)
         {
-            local.programKey.push_back( i->data()._shader.get() );
+            PolyShader* ps = iter.second._shader.get();
+
+            local.programKey.insert(ps->getHash());
+
+            if (ps->isFragmentStage())
+                ++numFragShaders;
         }
 
         // current frame number, for shader program expiry.
@@ -1662,8 +1430,8 @@ VirtualProgram::apply( osg::State& state ) const
         if (!program.valid())
         {
             // build a new set of accumulated functions, to support the creation of main()
-            ShaderComp::FunctionLocationMap accumFunctions;
-            accumulateFunctions( state, accumFunctions );
+            FunctionLocationMap accumFunctions;
+            accumulateFunctions(state, accumFunctions);
 
             local.programKey.clear();
 
@@ -1674,7 +1442,7 @@ VirtualProgram::apply( osg::State& state ) const
                 state,
                 accumFunctions,
                 local.accumShaderMap,
-                _globalExtensions,
+                local.accumExtensions,
                 local.accumAttribBindings,
                 local.accumAttribAliases,
                 _template.get(),
@@ -1718,97 +1486,65 @@ VirtualProgram::apply( osg::State& state ) const
 #endif
         }
         Registry::programRepo().unlock();
+        key.swap(local.programKey);
     }
 
     // finally, apply the program attribute.
-    if ( program.valid() )
+    if (program.valid())
     {
-#ifdef USE_STACK_MEMORY
-        // remember this program selection in case this VP is applied again
-        // during the same frame.
-        if (programRecalled == false        &&   // recalled a program? not necessary
-            getDataVariance() != DYNAMIC    &&   // DYNAMIC variance? might change during ST cull; no memory
-            !acceptCallbacksVary            &&   // accept callbacks vary per frame? cannot use memory
-            stack != 0L )
-        {
-            _vpStackMemory.remember(state, *stack, program.get());
-        }
-#endif // USE_STACK_MEMORY
-
         osg::Program::PerContextProgram* pcp;
 
-        pcp = program->getPCP( state );
+        pcp = program->getPCP(state);
 
         bool useProgram = state.getLastAppliedProgramObject() != pcp;
-
-#ifdef DEBUG_APPLY_COUNTS
-        if ( state.getFrameStamp() && state.getFrameStamp()->getFrameNumber()%60==0)
+        if (useProgram)
         {
-            // debugging            
-            static int s_framenum = 0;
-            static Threading::Mutex s_mutex;
-            static std::map< const VirtualProgram*, std::pair<int,int> > s_counts;
+            OE_PROFILING_ZONE_NAMED("use");
+            OE_PROFILING_ZONE_TEXT(program->getName());
 
-            Threading::ScopedMutexLock lock(s_mutex);
+            bool needsLink = pcp->needsLink();
 
-            int framenum = state.getFrameStamp()->getFrameNumber();
-            if ( framenum > s_framenum )
+            if (needsLink)
             {
-                OE_NOTICE << LC << "Use program in last frame: " << std::endl;
-                for(std::map<const VirtualProgram*,std::pair<int,int> >::iterator i = s_counts.begin(); i != s_counts.end(); ++i)
-                {
-                    std::pair<int,int>& counts = i->second;
-                    OE_NOTICE << LC << "  " 
-                        << i->first->getName() << " : attemped=" << counts.first << ", applied=" << counts.second << "\n";
-                }
-                s_framenum = framenum;
-                s_counts.clear();
+                Registry::programRepo().linkProgram(key, program.get(), pcp, state);
             }
-            s_counts[this].first++;
-            if ( useProgram )
-                s_counts[this].second++;
-        }
-#endif
 
-        if ( useProgram )
-        {
-            if( pcp->needsLink() )
-                program->compileGLObjects( state );
-
-            if( pcp->isLinked() )
+            if (pcp->isLinked())
             {
-                if( osg::isNotifyEnabled(osg::INFO) )
+                if (osg::isNotifyEnabled(osg::INFO))
                     pcp->validateProgram();
 
+                if (_gldebug && s_debugGroupPushed.exchange(true))
+                    OE_GL_POP;
+
                 pcp->useProgram();
-                state.setLastAppliedProgramObject( pcp );
+
+                if (_gldebug)
+                {
+                    std::string zone("[VP] " + program->getName());
+                    OE_GL_PUSH(zone.c_str());
+                }
+
+                state.setLastAppliedProgramObject(pcp);
             }
             else
             {
                 // program not usable, fallback to fixed function.
                 const osg::GL2Extensions* extensions = osg::GL2Extensions::Get(contextID, true);
-                extensions->glUseProgram( 0 );
+                extensions->glUseProgram(0);
                 state.setLastAppliedProgramObject(0);
-                OE_DEBUG << LC << "Program link failure!" << std::endl;
+
+                if (needsLink)
+                {
+                    OE_WARN << LC << "Program will not link!" << std::endl;
+                    ShaderInfoLog x(pcp->getProgram(), "");
+                    x.dumpErrors(state);
+                }
             }
         }
 
-#if 0 // test code for detecting race conditions
-        for(int i=0; i<10000; ++i) {
-            state.setLastAppliedProgramObject(0L);
-            program->apply( state );
-        }
-#endif
-
 #ifdef USE_LAST_USED_PROGRAM
         _lastUsedProgram[contextID] = program.get();
-#endif
-
-#if 0 // breakpoint for testing
-        if (state.checkGLErrors(this))
-        {
-            int x=0;
-        }
 #endif
     }
 }
@@ -1816,81 +1552,102 @@ VirtualProgram::apply( osg::State& state ) const
 bool
 VirtualProgram::checkSharing()
 {
-  if ( ::getenv("OSGEARTH_SHARED_VP_WARNING") && getNumParents() > 1)
-  {
-      OE_WARN << LC << "Modified VirtualProgram may be shared." << std::endl;
-      return true;
-  }
+    if (::getenv("OSGEARTH_SHARED_VP_WARNING") && getNumParents() > 1)
+    {
+        OE_WARN << LC << "Modified VirtualProgram may be shared." << std::endl;
+        return true;
+    }
 
-  return false;
+    return false;
 }
 
 void
-VirtualProgram::getFunctions( FunctionLocationMap& out ) const
+VirtualProgram::getFunctions(
+    VirtualProgram::FunctionLocationMap& out) const
 {
     // make a safe copy of the functions map.
-    _dataModelMutex.lock();
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
     out = _functions;
-    _dataModelMutex.unlock();
 }
 
 void
-VirtualProgram::getShaderMap( ShaderMap& out ) const
+VirtualProgram::getShaderMap(ShaderMap& out) const
 {
     // make a safe copy of the functions map.
-    _dataModelMutex.lock();
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
     out = _shaderMap;
-    _dataModelMutex.unlock();
 }
 
 void
-VirtualProgram::accumulateFunctions(const osg::State&                state,
-                                    ShaderComp::FunctionLocationMap& result) const
+VirtualProgram::accumulateFunctions(
+    const osg::State& state,
+    FunctionLocationMap& result) const
 {
     // This method searches the state's attribute stack and accumulates all 
     // the user functions (including those in this program).
-    if ( _inherit )
+    if (_inherit)
     {
         const AttrStack* av = StateEx::getProgramStack(state);
-        if ( av && av->size() > 0 )
+        if (av && av->size() > 0)
         {
             // find the closest VP that doesn't inherit:
             unsigned start;
-            for( start = (int)av->size()-1; start > 0; --start )
+            const osg::StateAttribute* sa;
+            for (start = (int)av->size() - 1; start > 0; --start)
             {
-                const VirtualProgram* vp = dynamic_cast<const VirtualProgram*>( (*av)[start].first );
-                if ( vp && (vp->_mask & _mask) && vp->_inherit == false )
+                sa = (*av)[start].first;
+#ifdef USE_TYPEID
+                if (typeid(*sa) != typeid(VirtualProgram))
+                    continue;
+                const VirtualProgram* vp = static_cast<const VirtualProgram*>(sa);
+#else
+                const VirtualProgram* vp = dynamic_cast<const VirtualProgram*>(sa);
+                if (!vp)
+                    continue;
+#endif
+
+                if ((vp->_mask & _mask) && vp->_inherit == false)
                     break;
             }
 
             // collect functions from there on down.
-            for( unsigned i=start; i<av->size(); ++i )
+            for (unsigned i = start; i < av->size(); ++i)
             {
-                const VirtualProgram* vp = dynamic_cast<const VirtualProgram*>( (*av)[i].first );
-                if ( vp && (vp->_mask && _mask) && (vp != this) )
+                sa = (*av)[i].first;
+#ifdef USE_TYPEID
+                if (typeid(*sa) != typeid(VirtualProgram))
+                    continue;
+                const VirtualProgram* vp = static_cast<const VirtualProgram*>(sa);
+#else
+                const VirtualProgram* vp = dynamic_cast<const VirtualProgram*>(sa);
+                if (!vp)
+                    continue;
+#endif
+
+                if ((vp->_mask & _mask) && (vp != this))
                 {
                     FunctionLocationMap rhs;
-                    vp->getFunctions( rhs );
+                    vp->getFunctions(rhs);
 
-                    for( FunctionLocationMap::const_iterator j = rhs.begin(); j != rhs.end(); ++j )
+                    for(auto& j : rhs)
                     {
-                        const OrderedFunctionMap& source = j->second;
-                        OrderedFunctionMap&       dest   = result[j->first];
+                        const OrderedFunctionMap& source = j.second;
+                        OrderedFunctionMap&       dest = result[j.first];
 
-                        for( OrderedFunctionMap::const_iterator k = source.begin(); k != source.end(); ++k )
+                        for (auto k = source.begin(); k != source.end(); ++k)
                         {
-                            if ( k->second.accept(state) )
+                            if (k->second.accept(state))
                             {
                                 // remove/override an existing function with the same name
-                                for( OrderedFunctionMap::iterator exists = dest.begin(); exists != dest.end(); ++exists )
+                                for (auto exists = dest.begin(); exists != dest.end(); ++exists)
                                 {
-                                    if ( exists->second._name.compare( k->second._name ) == 0 )
+                                    if (exists->second._name.compare(k->second._name) == 0)
                                     {
                                         dest.erase(exists);
                                         break;
                                     }
                                 }
-                                dest.insert( *k );
+                                dest.insert(*k);
                             }
                         }
                     }
@@ -1901,65 +1658,83 @@ VirtualProgram::accumulateFunctions(const osg::State&                state,
 
     // add the local ones too:
     {
-        //Threading::ScopedReadLock readonly( _dataModelMutex );
-        _dataModelMutex.lock();
+        scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
 
-        for( FunctionLocationMap::const_iterator j = _functions.begin(); j != _functions.end(); ++j )
+        for (auto& j : _functions)
         {
-            const OrderedFunctionMap& source = j->second;
-            OrderedFunctionMap&       dest   = result[j->first];
+            const OrderedFunctionMap& source = j.second;
+            OrderedFunctionMap&       dest = result[j.first];
 
-            for( OrderedFunctionMap::const_iterator k = source.begin(); k != source.end(); ++k )
+            for (auto k = source.begin(); k != source.end(); ++k)
             {
-                if ( k->second.accept(state) )
+                if (k->second.accept(state))
                 {
                     // remove/override an existing function with the same name
-                    for( OrderedFunctionMap::iterator exists = dest.begin(); exists != dest.end(); ++exists )
+                    for (auto exists = dest.begin(); exists != dest.end(); ++exists)
                     {
-                        if ( exists->second._name.compare( k->second._name ) == 0 )
+                        if (exists->second._name.compare(k->second._name) == 0)
                         {
                             dest.erase(exists);
                             break;
                         }
                     }
-                    dest.insert( *k );
+                    dest.insert(*k);
                 }
             }
         }
-
-        _dataModelMutex.unlock();
     }
 }
 
 
 
 void
-VirtualProgram::accumulateShaders(const osg::State&  state, 
-                                  unsigned           mask,
-                                  ShaderMap&         accumShaderMap,
-                                  AttribBindingList& accumAttribBindings,
-                                  AttribAliasMap&    accumAttribAliases,
-                                  bool&              acceptCallbacksVary)
+VirtualProgram::accumulateShaders(
+    const osg::State&  state,
+    unsigned           mask,
+    ShaderMap&         accumShaderMap,
+    AttribBindingList& accumAttribBindings,
+    AttribAliasMap&    accumAttribAliases,
+    ExtensionsSet&     accumExtensions,
+    bool&              acceptCallbacksVary)
 {
     acceptCallbacksVary = false;
 
     const AttrStack* av = StateEx::getProgramStack(state);
-    if ( av && av->size() > 0 )
+    if (av && av->size() > 0)
     {
         // find the deepest VP that doesn't inherit:
         unsigned start = 0;
-        for( start = (int)av->size()-1; start > 0; --start )
+        const osg::StateAttribute* sa;
+        for (start = (int)av->size() - 1; start > 0; --start)
         {
-            const VirtualProgram* vp = dynamic_cast<const VirtualProgram*>( (*av)[start].first );
-            if ( vp && (vp->_mask & mask) && vp->_inherit == false )
+            sa = (*av)[start].first;
+#ifdef USE_TYPEID
+            if (typeid(*sa) != typeid(VirtualProgram))
+                continue;
+            const VirtualProgram* vp = static_cast<const VirtualProgram*>(sa);
+#else
+            const VirtualProgram* vp = dynamic_cast<const VirtualProgram*>(sa);
+            if (!vp)
+                continue;
+#endif
+            if ((vp->_mask & mask) && vp->_inherit == false)
                 break;
         }
 
         // collect shaders from there to here:
-        for( unsigned i=start; i<av->size(); ++i )
+        for (unsigned i = start; i < av->size(); ++i)
         {
-            const VirtualProgram* vp = dynamic_cast<const VirtualProgram*>( (*av)[i].first );
-            if ( vp && (vp->_mask && mask) )
+            sa = (*av)[i].first;
+#ifdef USE_TYPEID
+            if (typeid(*sa) != typeid(VirtualProgram))
+                continue;
+            const VirtualProgram* vp = static_cast<const VirtualProgram*>(sa);
+#else
+            const VirtualProgram* vp = dynamic_cast<const VirtualProgram*>(sa);
+            if (!vp)
+                continue;
+#endif
+            if (vp->_mask & mask)
             {
                 if (vp->getAcceptCallbacksVaryPerFrame())
                 {
@@ -1967,94 +1742,94 @@ VirtualProgram::accumulateShaders(const osg::State&  state,
                 }
 
                 // thread-safely adds the other vp's shaders to our accumulation map
-                vp->addShadersToAccumulationMap( accumShaderMap, state );
+                vp->addShadersToAccumulationMap(accumShaderMap, state);
 
                 const AttribBindingList& abl = vp->getAttribBindingList();
-                accumAttribBindings.insert( abl.begin(), abl.end() );
+                accumAttribBindings.insert(abl.begin(), abl.end());
 
-#ifdef USE_ATTRIB_ALIASES
-                const AttribAliasMap& aliases = vp->getAttribAliases();
-                accumAttribAliases.insert( aliases.begin(), aliases.end() );
-#endif
+                const ExtensionsSet& es = vp->_globalExtensions;
+                accumExtensions.insert(es.begin(), es.end());
             }
         }
     }
 }
 
 void
-VirtualProgram::addShadersToAccumulationMap(VirtualProgram::ShaderMap& accumMap,
-                                            const osg::State&          state) const
+VirtualProgram::addShadersToAccumulationMap(
+    VirtualProgram::ShaderMap& accumMap,
+    const osg::State&          state) const
 {
-    //Threading::ScopedReadLock shared( _dataModelMutex );
-    _dataModelMutex.lock();
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
 
-    for( ShaderMap::const_iterator i = _shaderMap.begin(); i != _shaderMap.end(); ++i )
+    for (auto& iter : _shaderMap)
     {
-        if ( i->data().accept(state) )
+        if (iter.second.accept(state))
         {
-            addToAccumulatedMap(accumMap, i->key(), i->data());
+            addToAccumulatedMap(accumMap, iter.first, iter.second);
         }
     }
-
-    _dataModelMutex.unlock();
 }
 
 int
-VirtualProgram::getShaders(const osg::State&                        state,
-                           std::vector<osg::ref_ptr<osg::Shader> >& output)
+VirtualProgram::getShaders(
+    const osg::State& state,
+    std::vector<osg::ref_ptr<osg::Shader> >& output)
 {
     ShaderMap         shaders;
     AttribBindingList bindings;
     AttribAliasMap    aliases;
+    ExtensionsSet     extensions;
     bool              acceptCallbacksVary;
 
     // build the collection:
-    accumulateShaders(state, ~0, shaders, bindings, aliases, acceptCallbacksVary);
+    accumulateShaders(state, ~0, shaders, bindings, aliases, extensions, acceptCallbacksVary);
 
     // pre-allocate space:
-    output.reserve( shaders.size() );
+    output.reserve(shaders.size());
     output.clear();
 
     // copy to output.
-    for(ShaderMap::iterator i = shaders.begin(); i != shaders.end(); ++i)
+    for (auto& iter : shaders)
     {
-        output.push_back( i->data()._shader->getNominalShader() );
+        output.push_back(iter.second._shader->getNominalShader());
     }
 
     return output.size();
 }
 
 int
-VirtualProgram::getPolyShaders(const osg::State&                       state,
-                               std::vector<osg::ref_ptr<PolyShader> >& output)
+VirtualProgram::getPolyShaders(
+    const osg::State& state,
+    std::vector<osg::ref_ptr<PolyShader> >& output)
 {
     ShaderMap         shaders;
     AttribBindingList bindings;
     AttribAliasMap    aliases;
+    ExtensionsSet     extensions;
     bool              acceptCallbacksVary;
 
     // build the collection:
-    accumulateShaders(state, ~0, shaders, bindings, aliases, acceptCallbacksVary);
+    accumulateShaders(state, ~0, shaders, bindings, aliases, extensions, acceptCallbacksVary);
 
     // pre-allocate space:
-    output.reserve( shaders.size() );
+    output.reserve(shaders.size());
     output.clear();
 
     // copy to output.
-    for(ShaderMap::iterator i = shaders.begin(); i != shaders.end(); ++i)
+    for (auto& iter : shaders)
     {
-        output.push_back( i->data()._shader.get() );
+        output.push_back(iter.second._shader.get());
     }
 
     return output.size();
 }
 
-void VirtualProgram::setShaderLogging( bool log )
+void VirtualProgram::setShaderLogging(bool log)
 {
     setShaderLogging(log, "");
 }
 
-void VirtualProgram::setShaderLogging( bool log, const std::string& filepath )
+void VirtualProgram::setShaderLogging(bool log, const std::string& filepath)
 {
     _logShaders = log;
     _logPath = filepath;
@@ -2070,23 +1845,62 @@ void VirtualProgram::setAcceptCallbacksVaryPerFrame(bool acceptCallbacksVaryPerF
     _acceptCallbacksVaryPerFrame = acceptCallbacksVaryPerFrame;
 }
 
+int
+VirtualProgram::compare_safe(const VirtualProgram& rhs) const
+{
+    scoped_lock_if lock(_dataModelMutex, _useDataModelMutex);
+
+    // compare each parameter 
+    COMPARE_StateAttribute_Parameter(_mask);
+    COMPARE_StateAttribute_Parameter(_inherit);
+    COMPARE_StateAttribute_Parameter(_isAbstract);
+
+    if (_shaderMap.size() < rhs._shaderMap.size()) return -1;
+    if (_shaderMap.size() > rhs._shaderMap.size()) return +1;
+
+    ShaderMap::const_iterator lhsIter = _shaderMap.begin();
+    ShaderMap::const_iterator rhsIter = rhs._shaderMap.begin();
+
+    while (lhsIter != _shaderMap.end())
+    {
+        if (lhsIter->first < rhsIter->first) return -1;
+        if (lhsIter->first > rhsIter->first) return +1;
+
+        const ShaderEntry& lhsEntry = lhsIter->second;
+        const ShaderEntry& rhsEntry = rhsIter->second;
+
+        if (lhsEntry < rhsEntry) return -1;
+        if (rhsEntry < lhsEntry) return +1;
+
+        lhsIter++;
+        rhsIter++;
+    }
+
+    // compare the template settings.
+    if (_template.valid() && rhs.getTemplate())
+    {
+        int r = _template->compare(*(rhs.getTemplate()));
+        if (r != 0) return r;
+    }
+
+    return 0;
+}
+
 //.........................................................................
 
-PolyShader::PolyShader() :
-_dirty( true ),
-_location( ShaderComp::LOCATION_UNDEFINED ),
-_nominalType(osg::Shader::VERTEX)
+VirtualProgram::PolyShader::PolyShader() :
+    _dirty(true),
+    _location(VirtualProgram::LOCATION_UNDEFINED)
 {
     //nop
 }
 
-PolyShader::PolyShader(osg::Shader* shader) :
-_location( ShaderComp::LOCATION_UNDEFINED ),
-_nominalShader( shader ),
-_nominalType(osg::Shader::VERTEX)
+VirtualProgram::PolyShader::PolyShader(osg::Shader* shader) :
+    _location(VirtualProgram::LOCATION_UNDEFINED),
+    _nominalShader(shader)
 {
     _dirty = shader != 0L;
-    if ( shader )
+    if (shader)
     {
         _name = shader->getName();
 
@@ -2096,34 +1910,38 @@ _nominalType(osg::Shader::VERTEX)
 }
 
 void
-PolyShader::setShaderSource(const std::string& source)
+VirtualProgram::PolyShader::setShaderSource(const std::string& source)
 {
     _source = source;
     _dirty = true;
+    _hash.unset();
 }
 
 void
-PolyShader::setLocation(ShaderComp::FunctionLocation location)
+VirtualProgram::PolyShader::setLocation(VirtualProgram::FunctionLocation location)
 {
     _location = location;
     _dirty = true;
+    _hash.unset();
 }
 
 osg::Shader*
-PolyShader::getShader(ShaderComp::StageMask mask) const
+VirtualProgram::PolyShader::getShader(unsigned mask) const
 {
-    if (_location == ShaderComp::LOCATION_VERTEX_VIEW || _location == ShaderComp::LOCATION_VERTEX_CLIP)
+    if (_location == VirtualProgram::LOCATION_VERTEX_VIEW || 
+        _location == VirtualProgram::LOCATION_VERTEX_CLIP ||
+        _location == VirtualProgram::LOCATION_VERTEX_TRANSFORM_MODEL_TO_VIEW)
     {
         OE_DEBUG << "getShader, mask = " << std::hex << mask << ", location = " << _location << "\n";
-        
+
         // geometry stage has priority (runs last)
-        if ( mask & ShaderComp::STAGE_GEOMETRY )
+        if (mask & VirtualProgram::STAGE_GEOMETRY)
         {
             OE_DEBUG << "Installing GS for VIEW/CLIP shader!\n";
             return _geomShader.get();
         }
 
-        else if ( mask & ShaderComp::STAGE_TESSEVALUATION )
+        else if (mask & VirtualProgram::STAGE_TESSEVALUATION)
         {
             OE_DEBUG << "Installing TES for VIEW/CLIP shader!\n";
             return _tessevalShader.get();
@@ -2134,63 +1952,77 @@ PolyShader::getShader(ShaderComp::StageMask mask) const
 }
 
 void
-PolyShader::prepare()
+VirtualProgram::PolyShader::prepare()
 {
-    if ( _dirty )
+    if (_dirty)
     {
         osg::Shader::Type nominalType;
-        switch( _location )
+        switch (_location)
         {
-        case ShaderComp::LOCATION_VERTEX_MODEL:
-        case ShaderComp::LOCATION_VERTEX_VIEW:
-        case ShaderComp::LOCATION_VERTEX_CLIP:
+        case VirtualProgram::LOCATION_VERTEX_TRANSFORM_MODEL_TO_VIEW:
+        case VirtualProgram::LOCATION_VERTEX_MODEL:
+        case VirtualProgram::LOCATION_VERTEX_VIEW:
+        case VirtualProgram::LOCATION_VERTEX_CLIP:
             nominalType = osg::Shader::VERTEX;
             break;
-        case ShaderComp::LOCATION_TESS_CONTROL:
+        case VirtualProgram::LOCATION_TESS_CONTROL:
             nominalType = osg::Shader::TESSCONTROL;
             break;
-        case ShaderComp::LOCATION_TESS_EVALUATION:
+        case VirtualProgram::LOCATION_TESS_EVALUATION:
             nominalType = osg::Shader::TESSEVALUATION;
             break;
-        case ShaderComp::LOCATION_GEOMETRY:
+        case VirtualProgram::LOCATION_GEOMETRY:
             nominalType = osg::Shader::GEOMETRY;
             break;
-        case ShaderComp::LOCATION_FRAGMENT_COLORING:
-        case ShaderComp::LOCATION_FRAGMENT_LIGHTING:
-        case ShaderComp::LOCATION_FRAGMENT_OUTPUT:
+        case VirtualProgram::LOCATION_FRAGMENT_COLORING:
+        case VirtualProgram::LOCATION_FRAGMENT_LIGHTING:
+        case VirtualProgram::LOCATION_FRAGMENT_OUTPUT:
             nominalType = osg::Shader::FRAGMENT;
             break;
         default:
             nominalType = osg::Shader::UNDEFINED;
         }
 
-        if (nominalType != osg::Shader::UNDEFINED )
+        if (nominalType != osg::Shader::UNDEFINED)
         {
             _nominalShader = new osg::Shader(nominalType, _source);
-            if ( !_name.empty() )
+            if (!_name.empty())
                 _nominalShader->setName(_name);
         }
 
-        ShaderPreProcessor::run( _nominalShader.get() );
+        ShaderPreProcessor::runPost(_nominalShader.get());
 
         // for a VERTEX_VIEW or VERTEX_CLIP shader, these might get moved to another stage.
-        if ( _location == ShaderComp::LOCATION_VERTEX_VIEW || _location == ShaderComp::LOCATION_VERTEX_CLIP )
+        if (_location == VirtualProgram::LOCATION_VERTEX_VIEW ||
+            _location == VirtualProgram::LOCATION_VERTEX_CLIP ||
+            _location == VirtualProgram::LOCATION_VERTEX_TRANSFORM_MODEL_TO_VIEW)
         {
             _geomShader = new osg::Shader(osg::Shader::GEOMETRY, _source);
-            if ( !_name.empty() )
+            if (!_name.empty())
                 _geomShader->setName(_name);
-            ShaderPreProcessor::run( _geomShader.get() );
+            ShaderPreProcessor::runPost(_geomShader.get());
 
             _tessevalShader = new osg::Shader(osg::Shader::TESSEVALUATION, _source);
-            if ( !_name.empty() )
+            if (!_name.empty())
                 _tessevalShader->setName(_name);
-            ShaderPreProcessor::run( _tessevalShader.get() );
+            ShaderPreProcessor::runPost(_tessevalShader.get());
         }
     }
     _dirty = false;
 }
 
-void PolyShader::resizeGLObjectBuffers(unsigned maxSize)
+unsigned
+VirtualProgram::PolyShader::getHash()
+{
+    if (_hash.isSet() == false)
+    {
+        _hash = osgEarth::hashString(_source);
+    }
+    return _hash.get();
+}
+
+void
+VirtualProgram::PolyShader::resizeGLObjectBuffers(unsigned maxSize)
 {
     if (_nominalShader.valid())
     {
@@ -2208,62 +2040,80 @@ void PolyShader::resizeGLObjectBuffers(unsigned maxSize)
     }
 }
 
-void PolyShader::releaseGLObjects(osg::State* state) const
+void
+VirtualProgram::PolyShader::releaseGLObjects(osg::State* state) const
 {
-   if (_nominalShader.valid())
-   {
-      _nominalShader->releaseGLObjects(state);
-   }
+    if (_nominalShader.valid())
+    {
+        _nominalShader->releaseGLObjects(state);
+    }
 
-   if (_geomShader.valid())
-   {
-      _geomShader->releaseGLObjects(state);
-   }
+    if (_geomShader.valid())
+    {
+        _geomShader->releaseGLObjects(state);
+    }
 
-   if (_tessevalShader.valid())
-   {
-      _tessevalShader->releaseGLObjects(state);
-   }
+    if (_tessevalShader.valid())
+    {
+        _tessevalShader->releaseGLObjects(state);
+    }
 }
 
-PolyShader*
-PolyShader::lookUpShader(const std::string& functionName, const std::string& shaderSource, ShaderComp::FunctionLocation location)
+VirtualProgram::PolyShader*
+VirtualProgram::PolyShader::lookUpShader(
+    const std::string& functionName,
+    const std::string& shaderSource,
+    VirtualProgram::FunctionLocation location)
 {
-   PolyShader* shader = NULL;
-   
-#ifdef USE_POLYSHADER_CACHE
-
-   Threading::ScopedMutexLock lock(_cacheMutex);
-
-   std::pair<std::string, std::string> hashKey = std::pair<std::string, std::string>(functionName, shaderSource);
-
-   PolyShaderCache::iterator iter = _polyShaderCache.find(hashKey);
- 
-   if (iter != _polyShaderCache.end())
-   {
-      shader = iter->second.get();
-   }
-#endif
-
-   if (!shader)
-   {
-
-      // Remove any quotes in the shader source (illegal)
-      std::string source(shaderSource);
-      osgEarth::replaceIn(source, "\"", " ");
-
-      shader = new PolyShader();
-      shader->setName(functionName);
-      shader->setLocation(location);
-      shader->setShaderSource(source);
-      shader->prepare();
+    PolyShader* shader = NULL;
 
 #ifdef USE_POLYSHADER_CACHE
-      _polyShaderCache[hashKey] = shader;
-#endif
-   }
 
-   return shader;
+    std::lock_guard<std::mutex> lock(_cacheMutex);
+
+    std::pair<std::string, std::string> hashKey(functionName, shaderSource);
+
+    PolyShaderCache::iterator iter = _polyShaderCache.find(hashKey);
+
+    if (iter != _polyShaderCache.end())
+    {
+        shader = iter->second.get();
+    }
+#endif
+
+    if (!shader)
+    {
+        std::string source(shaderSource);
+        ShaderLoader::configureHeader(source);
+
+        shader = new PolyShader();
+        shader->setName(functionName);
+        shader->setLocation(location);
+        shader->setShaderSource(source);
+        shader->prepare();
+
+#ifdef USE_POLYSHADER_CACHE
+        _polyShaderCache[hashKey] = shader;
+#endif
+    }
+
+    return shader;
+}
+
+
+void
+VirtualProgram::PolyShader::clearShaderCache()
+{
+    _cacheMutex.lock();
+    // Erase our PolyShaders from the static _shaderCache
+    PolyShaderCache::iterator shadeEnd = _polyShaderCache.end();
+    PolyShaderCache::iterator shadeItr = _polyShaderCache.begin();
+
+    for (; shadeItr != shadeEnd; ++shadeItr)
+    {
+        shadeItr->second = NULL;
+    }
+    _cacheMutex.unlock();
 }
 
 //.......................................................................
@@ -2273,6 +2123,8 @@ PolyShader::lookUpShader(const std::string& functionName, const std::string& sha
 #include <osgDB/InputStream>
 #include <osgDB/OutputStream>
 
+namespace
+{
 #define PROGRAM_LIST_FUNC( PROP, TYPE, DATA ) \
     static bool check##PROP(const osgEarth::VirtualProgram& attr) \
     { return attr.get##TYPE().size()>0; } \
@@ -2297,135 +2149,132 @@ PolyShader::lookUpShader(const std::string& functionName, const std::string& sha
         return true; \
     }
 
-PROGRAM_LIST_FUNC( AttribBinding, AttribBindingList, BindAttribLocation );
-//PROGRAM_LIST_FUNC( FragDataBinding, FragDataBindingList, BindFragDataLocation );
+    PROGRAM_LIST_FUNC(AttribBinding, AttribBindingList, BindAttribLocation);
 
-// functions
-static bool checkFunctions( const osgEarth::VirtualProgram& attr )
-{
-    osgEarth::ShaderComp::FunctionLocationMap functions;
-    attr.getFunctions(functions);
-
-    unsigned count = 0;
-    for (osgEarth::ShaderComp::FunctionLocationMap::const_iterator loc = functions.begin(); loc != functions.end(); ++loc)
-        count += loc->second.size();
-    return count > 0;
-}
-
-static bool readFunctions( osgDB::InputStream& is, osgEarth::VirtualProgram& attr )
-{
-    unsigned int size = is.readSize();
-    is >> is.BEGIN_BRACKET;
-
-    for ( unsigned int i=0; i<size; ++i )
+    // functions
+    static bool checkFunctions(const osgEarth::VirtualProgram& attr)
     {
-        std::string name;
-        is >> name >> is.BEGIN_BRACKET;
-        OE_DEBUG << "Name = " << name << std::endl;
-        {
-            unsigned location;
-            is >> is.PROPERTY("Location") >> location;
-            OE_DEBUG << "Location = " << location << std::endl;
+        osgEarth::VirtualProgram::FunctionLocationMap functions;
+        attr.getFunctions(functions);
 
-            float order;
-            is >> is.PROPERTY("Order") >> order;
-            OE_DEBUG << "Order = " << order << std::endl;
-
-            std::string source;
-            is >> is.PROPERTY("Source");
-            unsigned lines = is.readSize();
-            is >> is.BEGIN_BRACKET;
-            {
-                for (unsigned j=0; j<lines; ++j)
-                {
-                    std::string line;
-                    is.readWrappedString(line);
-                    source.append(line); source.append(1, '\n');
-                }
-            }
-            OE_DEBUG << "Source = " << source << std::endl;
-            is >> is.END_BRACKET;
-
-            attr.setFunction(name, source, (osgEarth::ShaderComp::FunctionLocation)location, order);
-        }
-        is >> is.END_BRACKET;
+        unsigned count = 0;
+        for (osgEarth::VirtualProgram::FunctionLocationMap::const_iterator loc = functions.begin(); loc != functions.end(); ++loc)
+            count += loc->second.size();
+        return count > 0;
     }
-    is >> is.END_BRACKET;
-    return true;
-}
 
-static bool writeFunctions( osgDB::OutputStream& os, const osgEarth::VirtualProgram& attr )
-{
-    osgEarth::ShaderComp::FunctionLocationMap functions;
-    attr.getFunctions(functions);
-
-    osgEarth::VirtualProgram::ShaderMap shaders;
-    attr.getShaderMap(shaders);
-    
-    unsigned count = 0;
-    for (osgEarth::ShaderComp::FunctionLocationMap::const_iterator loc = functions.begin(); loc != functions.end(); ++loc)
-        count += loc->second.size();       
-
-    os.writeSize(count);
-    os << os.BEGIN_BRACKET << std::endl;
+    static bool readFunctions(osgDB::InputStream& is, osgEarth::VirtualProgram& attr)
     {
-        for (osgEarth::ShaderComp::FunctionLocationMap::const_iterator loc = functions.begin(); loc != functions.end(); ++loc)
+        unsigned int size = is.readSize();
+        is >> is.BEGIN_BRACKET;
+
+        for (unsigned int i = 0; i < size; ++i)
         {
-            const osgEarth::ShaderComp::OrderedFunctionMap& ofm = loc->second;
-            for (osgEarth::ShaderComp::OrderedFunctionMap::const_iterator k = ofm.begin(); k != ofm.end(); ++k)
+            std::string name;
+            is >> name >> is.BEGIN_BRACKET;
+            OE_DEBUG << "Name = " << name << std::endl;
             {
-                os << k->second._name << os.BEGIN_BRACKET << std::endl;
+                unsigned location;
+                is >> is.PROPERTY("Location") >> location;
+                OE_DEBUG << "Location = " << location << std::endl;
+
+                float order;
+                is >> is.PROPERTY("Order") >> order;
+                OE_DEBUG << "Order = " << order << std::endl;
+
+                std::string source;
+                is >> is.PROPERTY("Source");
+                unsigned lines = is.readSize();
+                is >> is.BEGIN_BRACKET;
                 {
-                    os << os.PROPERTY("Location") << (unsigned)loc->first << std::endl;
-                    os << os.PROPERTY("Order") << k->first << std::endl;
-                    // todo: min/max range?
-
-                    osgEarth::VirtualProgram::ShaderID shaderId = MAKE_SHADER_ID(k->second._name);
-                    const osgEarth::VirtualProgram::ShaderEntry* m = shaders.find(shaderId);
-                    if (m)
-                    {                    
-                        std::vector<std::string> lines;
-                        std::istringstream iss(m->_shader->getShaderSource());
+                    for (unsigned j = 0; j < lines; ++j)
+                    {
                         std::string line;
-                        while ( std::getline(iss, line) )
-                            lines.push_back( line );
-
-                        os << os.PROPERTY("Source");
-                        os.writeSize(lines.size());
-                        os << os.BEGIN_BRACKET << std::endl;
-                        {
-                            for (std::vector<std::string>::const_iterator itr = lines.begin(); itr != lines.end(); ++itr)
-                            {
-                                os.writeWrappedString(*itr);
-                                os << std::endl;
-                            }
-                        }
-                        os << os.END_BRACKET << std::endl;
+                        is.readWrappedString(line);
+                        source.append(line); source.append(1, '\n');
                     }
                 }
-                os << os.END_BRACKET << std::endl;
+                OE_DEBUG << "Source = " << source << std::endl;
+                is >> is.END_BRACKET;
+
+                attr.setFunction(name, source, (osgEarth::VirtualProgram::FunctionLocation)location, order);
+            }
+            is >> is.END_BRACKET;
+        }
+        is >> is.END_BRACKET;
+        return true;
+    }
+
+    static bool writeFunctions(osgDB::OutputStream& os, const osgEarth::VirtualProgram& attr)
+    {
+        osgEarth::VirtualProgram::FunctionLocationMap functions;
+        attr.getFunctions(functions);
+
+        osgEarth::VirtualProgram::ShaderMap shaders;
+        attr.getShaderMap(shaders);
+
+        unsigned count = 0;
+        for (osgEarth::VirtualProgram::FunctionLocationMap::const_iterator loc = functions.begin(); loc != functions.end(); ++loc)
+            count += loc->second.size();
+
+        os.writeSize(count);
+        os << os.BEGIN_BRACKET << std::endl;
+        {
+            for (osgEarth::VirtualProgram::FunctionLocationMap::const_iterator loc = functions.begin(); loc != functions.end(); ++loc)
+            {
+                const osgEarth::VirtualProgram::OrderedFunctionMap& ofm = loc->second;
+                for (osgEarth::VirtualProgram::OrderedFunctionMap::const_iterator k = ofm.begin(); k != ofm.end(); ++k)
+                {
+                    os << k->second._name << os.BEGIN_BRACKET << std::endl;
+                    {
+                        os << os.PROPERTY("Location") << (unsigned)loc->first << std::endl;
+                        os << os.PROPERTY("Order") << k->first << std::endl;
+
+                        osgEarth::VirtualProgram::ShaderID shaderId = MAKE_SHADER_ID(k->second._name);
+                        osgEarth::VirtualProgram::ShaderMap::const_iterator miter = shaders.find(shaderId);
+                        const osgEarth::VirtualProgram::ShaderEntry* m = miter != shaders.end() ? &miter->second : NULL;
+                        if (m)
+                        {
+                            std::vector<std::string> lines;
+                            std::istringstream iss(m->_shader->getShaderSource());
+                            std::string line;
+                            while (std::getline(iss, line))
+                                lines.push_back(line);
+
+                            os << os.PROPERTY("Source");
+                            os.writeSize(lines.size());
+                            os << os.BEGIN_BRACKET << std::endl;
+                            {
+                                for (std::vector<std::string>::const_iterator itr = lines.begin(); itr != lines.end(); ++itr)
+                                {
+                                    os.writeWrappedString(*itr);
+                                    os << std::endl;
+                                }
+                            }
+                            os << os.END_BRACKET << std::endl;
+                        }
+                    }
+                    os << os.END_BRACKET << std::endl;
+                }
             }
         }
+        os << os.END_BRACKET << std::endl;
+
+        return true;
     }
-    os << os.END_BRACKET << std::endl;
 
-    return true;
-}
-
-namespace
-{
     REGISTER_OBJECT_WRAPPER(
         VirtualProgram,
         new osgEarth::VirtualProgram,
         osgEarth::VirtualProgram,
         "osg::Object osg::StateAttribute osgEarth::VirtualProgram")
     {
-        ADD_BOOL_SERIALIZER( InheritShaders, true );
-        ADD_UINT_SERIALIZER( Mask, ~0 );
+        ADD_BOOL_SERIALIZER(InheritShaders, true);
+        ADD_UINT_SERIALIZER(Mask, ~0);
 
-        ADD_USER_SERIALIZER( AttribBinding );
-        ADD_USER_SERIALIZER( Functions );
+        ADD_USER_SERIALIZER(AttribBinding);
+        ADD_USER_SERIALIZER(Functions);
 
-        ADD_BOOL_SERIALIZER( IsAbstract, false );
+        ADD_BOOL_SERIALIZER(IsAbstract, false);
     }
 }

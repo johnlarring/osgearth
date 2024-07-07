@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -26,7 +26,7 @@
 #include <osgDB/Registry>
 #include <string>
 #include <sstream>
-#include <osgEarthUtil/Common>
+#include <osgEarth/Common>
 
 using namespace osgEarth_osgearth;
 using namespace osgEarth;
@@ -41,10 +41,10 @@ using namespace osgEarth;
 
 
 #if defined(WIN32)
-#   define LIBNAME_UTIL "osgEarthUtil"
+#   define LIBNAME_UTIL "osgEarth"
 #   define LIBNAME_UTIL_EXTENSION ".dll"
 #else
-#   define LIBNAME_UTIL "libosgEarthUtil"
+#   define LIBNAME_UTIL "libosgEarth"
 #   if defined(__APPLE__)
 #       define LIBNAME_UTIL_EXTENSION ".dylib"
 #   else
@@ -70,7 +70,7 @@ namespace
     {
         if ( rhs.value() != lhs.value() )
         {
-            lhs.value() = rhs.value();
+            lhs.setValue(rhs.value());
         }
 
         for(ConfigSet::const_iterator rhsChild = rhs.children().begin(); rhsChild != rhs.children().end(); ++rhsChild)
@@ -92,7 +92,6 @@ class ReaderWriterEarth : public osgDB::ReaderWriter
         {
             // force the loading of other osgEarth libraries that might be needed to 
             // deserialize an earth file. 
-            // osgEarthUtil: contains ColorFilter implementations
             OE_DEBUG << LC << "Forced load: " << LIBNAME_UTIL LIBNAME_UTIL_POSTFIX LIBNAME_UTIL_EXTENSION << std::endl;
             osgDB::Registry::instance()->loadLibrary( LIBNAME_UTIL LIBNAME_UTIL_POSTFIX LIBNAME_UTIL_EXTENSION );
         }
@@ -241,7 +240,8 @@ class ReaderWriterEarth : public osgDB::ReaderWriter
             if ( !conf.empty() )
             {
                 // see if we were given a reference URI to use:
-                std::string refURI = uriContext.referrer();
+                const std::string& refURI = uriContext.referrer();
+
 
                 if ( conf.value("version") == "1" )
                 {
@@ -281,7 +281,7 @@ class ReaderWriterEarth : public osgDB::ReaderWriter
                     }
 
                     EarthFileSerializer2 ser;
-                    node = ser.deserialize( conf, refURI );
+                    node = ser.deserialize(conf, refURI, readOptions);
                 }
             }
 

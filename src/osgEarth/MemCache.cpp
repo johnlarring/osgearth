@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -22,6 +22,8 @@ using namespace osgEarth;
 
 #define LC "[MemCacheBin] "
 
+//#define CLONE_DATA
+
 //------------------------------------------------------------------------
 
 namespace
@@ -32,7 +34,7 @@ namespace
     struct MemCacheBin : public CacheBin
     {
         MemCacheBin( const std::string& id, unsigned maxSize )
-            : CacheBin( id ),
+            : CacheBin( id, true ),
               _lru    ( true /* MT-safe */, maxSize )
         {
             //nop
@@ -47,15 +49,16 @@ namespace
 
             if ( rec.valid() )
             {
-                //OE_INFO << LC << "hits: " << _lru.getStats()._hitRatio*100.0f << "%" << std::endl;
-
+#ifdef CLONE_DATA
                 return ReadResult( 
                    osg::clone(rec.value().first.get(), osg::CopyOp::DEEP_COPY_ALL),
                    rec.value().second );
+#else
+                return ReadResult(const_cast<osg::Object*>(rec.value().first.get()), rec.value().second);
+#endif
             }
             else
             {
-                //OE_INFO << LC << "hits: " << _lru.getStats()._hitRatio*100.0f << "%" << std::endl;
                 return ReadResult();
             }
         }
@@ -74,8 +77,12 @@ namespace
         {
             if ( object ) 
             {
+#ifdef CLONE_DATA
                 osg::ref_ptr<const osg::Object> cloned = osg::clone(object, osg::CopyOp::DEEP_COPY_ALL);
                 _lru.insert( key, std::make_pair(cloned.get(), meta) );
+#else
+                _lru.insert( key, std::make_pair(object, meta) );
+#endif
                 return true;
             }
             else
@@ -116,13 +123,13 @@ namespace
     };
     
 
-    static Threading::Mutex s_defaultBinMutex;
+    static std::mutex s_defaultBinMutex;
 }
 
 //------------------------------------------------------------------------
 
 MemCache::MemCache( unsigned maxBinSize ) :
-_maxBinSize( std::max(maxBinSize, 1u) )
+_maxBinSize( osg::maximum(maxBinSize, 1u) )
 {
     //nop
 }
@@ -147,7 +154,7 @@ MemCache::getOrCreateDefaultBin()
 {
     if ( !_defaultBin.valid() )
     {
-        Threading::ScopedMutexLock lock( s_defaultBinMutex );
+        std::lock_guard<std::mutex> lock( s_defaultBinMutex );
         // double check
         if ( !_defaultBin.valid() )
         {

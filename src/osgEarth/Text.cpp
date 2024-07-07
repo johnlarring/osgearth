@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -49,23 +49,19 @@ REGISTER_OBJECT_WRAPPER( osgEarth_Text,
 Text::Text() : 
 osgText::Text()
 {
-#if OSG_VERSION_GREATER_OR_EQUAL(3,5,8)
     if (osg::DisplaySettings::instance()->getTextShaderTechnique().empty())
     {
         setShaderTechnique(osgText::ALL_FEATURES);
     }
-#endif
 }
 
 Text::Text(const std::string& str) :
 osgText::Text()
 {
-#if OSG_VERSION_GREATER_OR_EQUAL(3,5,8)
     if (osg::DisplaySettings::instance()->getTextShaderTechnique().empty())
     {
         setShaderTechnique(osgText::ALL_FEATURES);
     }
-#endif
 
     setText(str);
 }
@@ -84,7 +80,6 @@ Text::~Text()
 osg::StateSet*
 Text::createStateSet()
 {
-#if OSG_VERSION_GREATER_OR_EQUAL(3,5,8)
     // NOTE: Most of this is copied from the parent class, except for the 
     // added osgEarth defines and the VirtualProgram in place of the Program.
     osgText::Font* activeFont = getActiveFont();
@@ -167,10 +162,14 @@ Text::createStateSet()
 #endif
     defineList[OE_LIGHTING_DEFINE] = osg::StateSet::DefinePair("", osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
 
+    // We do not want the default OE texturing shader active;
+    // it screws with the text color!
+    defineList["OE_DISABLE_DEFAULT_SHADER"] = osg::StateSet::DefinePair("1", osg::StateAttribute::ON);
+
     // The remaining of this method is exclusive so we don't corrupt the
     // stateset cache when creating text objects from multiple threads. -gw
-    static Threading::Mutex mutex;
-    Threading::ScopedMutexLock lock(mutex);
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
 
     if (!statesets.empty())
     {
@@ -216,13 +215,9 @@ Text::createStateSet()
     VirtualProgram* vp = VirtualProgram::getOrCreate(stateset.get());
     vp->setName("osgEarth::Text");
     osgEarth::Shaders coreShaders;
-    coreShaders.load(vp, coreShaders.TextVertex);
-    coreShaders.load(vp, coreShaders.TextFragment);
+    coreShaders.load(vp, coreShaders.Text);
 
     return stateset.release();
-#else
-    return 0L;
-#endif
 }
 
 void
@@ -231,33 +226,5 @@ Text::setFont(osg::ref_ptr<osgText::Font> font)
     if (_font.get() == font.get())
         return;
 
-#if OSG_VERSION_GREATER_OR_EQUAL(3,5,8)
     osgText::Text::setFont(font);
-#else
-    static Threading::Mutex mutex;
-    Threading::ScopedMutexLock lock(mutex);
-
-    osg::StateSet* previousFontStateSet = _font.valid() ? _font->getStateSet() : osgText::Font::getDefaultFont()->getStateSet();
-    osg::StateSet* newFontStateSet = font.valid() ? font->getStateSet() : osgText::Font::getDefaultFont()->getStateSet();
-    //if (getStateSet() == previousFontStateSet)
-    {
-        if (newFontStateSet && VirtualProgram::get(newFontStateSet) == 0L)
-        {
-            VirtualProgram* vp = VirtualProgram::getOrCreate(newFontStateSet);
-            vp->setName("osgEarth::Text");
-            osgEarth::Shaders coreShaders;
-            coreShaders.load(vp, coreShaders.TextLegacy);
-#if defined(OSG_GL3_AVAILABLE) && !defined(OSG_GL2_AVAILABLE) && !defined(OSG_GL1_AVAILABLE)
-            newFontStateSet->setDefine("OSGTEXT_GLYPH_ALPHA_FORMAT_IS_RED");
-#endif
-            Lighting::set(newFontStateSet, osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED);
-
-            OE_INFO << LC << "Installed VPs on a font" << std::endl;
-        }
-
-        setStateSet( newFontStateSet );
-    }
-
-    osgText::TextBase::setFont(font);
-#endif
 }

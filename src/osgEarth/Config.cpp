@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -23,15 +23,14 @@
 #include <osgEarth/XmlUtils>
 #include <osgEarth/JsonUtils>
 #include <osgEarth/FileUtils>
+#include <osgEarth/URI>
 #include <osgDB/FileNameUtils>
+#include <osgEarth/Notify>
+#include <osgDB/Options>
 
 using namespace osgEarth;
 
 #define LC "[Config] "
-
-Config::~Config()
-{
-}
 
 void
 Config::setReferrer( const std::string& referrer )
@@ -71,9 +70,47 @@ bool
 Config::fromXML( std::istream& in )
 {
     osg::ref_ptr<XmlDocument> xml = XmlDocument::load( in );
-    if ( xml.valid() )
-        *this = xml->getConfig();
+    if (xml.valid())
+    {
+        *this = std::move(xml->getConfig());
+    }
     return xml.valid();
+}
+
+bool
+Config::fromURI(const URI& uri)
+{
+    auto result = uri.readString();
+    if (result.failed())
+        return false;
+
+    std::string data = result.getString();
+    if (!data.empty())
+    {
+        data = trim(data);
+
+        if (data[0] == '{')
+        {
+            fromJSON(data);
+        }
+        else if (data[0] == '<')
+        {
+            std::istringstream in(data);
+            fromXML(in);
+            if (key() == "Document" && children().size() > 0)
+            {
+                Config temp = std::move(children().front());
+                *this = temp;
+            }               
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    setReferrer(uri.full());
+    return true;
 }
 
 #if 1
@@ -175,25 +212,6 @@ Config::find( const std::string& key, bool checkMe )
     return 0L;
 }
 
-/****************************************************************/
-ConfigOptions::~ConfigOptions()
-{
-}
-
-Config
-ConfigOptions::getConfig() const
-{
-    // iniialize with the raw original conf. subclass getConfig's can 
-    // override the values there.
-    Config conf = _conf;
-    conf.setReferrer(referrer());
-    return conf;
-}
-
-/****************************************************************/
-DriverConfigOptions::~DriverConfigOptions()
-{
-}
 
 namespace
 {
@@ -227,7 +245,7 @@ namespace
             {
                 if ( nicer )
                 {
-                    std::map< std::string, std::vector<Config> > sets;
+                    std::map< std::string, std::vector<Config> > sets; // sorted
 
                     // sort into bins by name:
                     for( ConfigSet::const_iterator c = conf.children().begin(); c != conf.children().end(); ++c )
@@ -242,7 +260,10 @@ namespace
                             Config& c = i->second[0];
                             if ( c.isSimple() )
                             {
-                                value[i->first] = c.value();
+                                if (c.isNumber())
+                                    value[i->first] = c.valueAs<double>(0.0);
+                                else
+                                    value[i->first] = c.value();
                             }
                             else
                             {
@@ -357,7 +378,7 @@ namespace
                 }
                 else if ( (*i) == "$value" )
                 {
-                    conf.value() = value.asString();
+                    conf.setValue(value.asString());
                 }
                 else if ( (*i) == "$children" && value.isArray() )
                 {
@@ -365,7 +386,16 @@ namespace
                 }
                 else
                 {
-                    conf.add( *i, value.asString() );
+                    if( value.isBool())
+                        conf.add(*i, value.asBool());
+                    else if( value.isDouble())
+                        conf.add(*i, value.asDouble());
+                    else if (value.isInt())
+                        conf.add(*i, value.asInt());
+                    else if (value.isUInt())
+                        conf.add(*i, value.asUInt());
+                    else
+                        conf.add(*i, value.asString());
                 }
             }
         }
@@ -381,7 +411,7 @@ namespace
         }
         else if ( json.type() != Json::nullValue )
         {
-            conf.value() = json.asString();
+            conf.setValue(json.asString());
         }
     }
 }

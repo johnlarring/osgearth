@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -27,13 +27,15 @@
 #include <osg/Texture>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
-static bool
-isNoData( float f )
+namespace
 {
-  return f == FLT_MAX || f == -FLT_MAX;
+    bool isNoData( float f )
+    {
+        return f == FLT_MAX || f == -FLT_MAX;
+    }
 }
-
 
 ImageToHeightFieldConverter::ImageToHeightFieldConverter():
 _replace_nodata( false ),
@@ -196,6 +198,20 @@ osg::Image* ImageToHeightFieldConverter::convertToR32F(const osg::HeightField* h
     osg::Image* image = new osg::Image();
     image->allocateImage(hf->getNumColumns(), hf->getNumRows(), 1, GL_RED, GL_FLOAT);
     image->setInternalTextureFormat(GL_R32F);
+    memcpy(image->data(), &hf->getFloatArray()->front(), sizeof(float) * hf->getFloatArray()->size());
+
+    return image;
+}
+
+osg::Image* ImageToHeightFieldConverter::convertToR16F(const osg::HeightField* hf) const
+{
+    if (!hf) {
+        return NULL;
+    }
+
+    osg::Image* image = new osg::Image();
+    image->allocateImage(hf->getNumColumns(), hf->getNumRows(), 1, GL_RED, GL_FLOAT);
+    image->setInternalTextureFormat(GL_R16F);
     memcpy(image->data(), &hf->getFloatArray()->front(), sizeof(float) * hf->getFloatArray()->size());
 
     return image;

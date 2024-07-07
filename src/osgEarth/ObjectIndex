@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2012 Pelican Mapping
 * http://osgearth.org
 *
@@ -23,13 +23,13 @@
 #define OSGEARTH_OBJECT_INDEX_H
 
 #include <osgEarth/Common>
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
 #include <osgEarth/ShaderLoader>
 #include <osg/Version>
 #include <osg/Drawable>
 #include <osg/Array>
-#include <OpenThreads/Atomic>
 #include <algorithm>
+#include <unordered_map>
 
 #define OSGEARTH_OBJECTID_EMPTY   (ObjectID)0
 #define OSGEARTH_OBJECTID_TERRAIN (ObjectID)1
@@ -38,6 +38,8 @@ namespace osgEarth
 {
     typedef unsigned       ObjectID;
     typedef osg::UIntArray ObjectIDArray;
+
+    using namespace Util;
 
     /** 
      * Virutal interface class for building an object index.
@@ -63,6 +65,13 @@ namespace osgEarth
          * the object id. Returns the Object ID.
          */
         virtual ObjectID tagNode(osg::Node* node, T* object) =0;
+
+        /**
+         * Inserts the object into the index, and tags the drawable's range with its object id.
+         * Use this if you are already creating merged geometries in a single drawable.
+         * Returns the ID of the object.
+         */
+        virtual ObjectID tagRange(osg::Drawable* drawable, T* object, unsigned int start, unsigned int count) = 0;
     };
 
 
@@ -91,7 +100,7 @@ namespace osgEarth
          */
         template<typename T>
         osg::ref_ptr<T> get(ObjectID id) const {
-            Threading::ScopedMutexLock lock(_mutex);
+            std::lock_guard<std::mutex> lock(_mutex);
             return dynamic_cast<T*>( getImpl(id) );
         }   
 
@@ -173,6 +182,13 @@ namespace osgEarth
          */
         ObjectID tagNode(osg::Node* node, osg::Referenced* object);
 
+        /**
+         * Inserts the object into the index, and tags the drawable's range with its object id.
+         * Use this if you are already creating merged geometries in a single drawable.
+         * Returns the ID of the object.
+         */
+        ObjectID tagRange(osg::Drawable* drawable, osg::Referenced* object, unsigned int start, unsigned int count);
+
 
     public: // Raw tagging methods.
 
@@ -194,28 +210,34 @@ namespace osgEarth
         void tagNode(osg::Node* node, ObjectID id) const;
 
         /**
+         * Tags the drawable's range with its object id.
+         * Use this if you are already creating merged geometries in a single drawable.         
+         */
+        void tagRange(osg::Drawable* drawable, ObjectID id, unsigned int start, unsigned int count) const;
+
+        /**
          * For each ObjectID found in a drawable, update it with a new Object ID and
          * populate an output table that maps the old ID to the new ID. Internal function
          * used for serialization support.
          */
-        bool updateObjectIDs(osg::Drawable* drawable, std::map<ObjectID, ObjectID>& oldNewTable, osg::Referenced* obj);
+        bool updateObjectIDs(osg::Drawable* drawable, std::unordered_map<ObjectID, ObjectID>& oldNewTable, osg::Referenced* obj);
 
         /**
          * On a node, replace an existing objectID with a new one and return the mapping.
          * Internal function used for serialization support.
          */
-        bool updateObjectID(osg::Node* node, std::map<ObjectID, ObjectID>& oldNewTable, osg::Referenced* obj);
+        bool updateObjectID(osg::Node* node, std::unordered_map<ObjectID, ObjectID>& oldNewTable, osg::Referenced* obj);
 
     protected:
         virtual ~ObjectIndex() { }
         
-        typedef std::map<ObjectID, osg::observer_ptr<osg::Referenced> > IndexMap;
+        using IndexMap = std::unordered_map<ObjectID, osg::observer_ptr<osg::Referenced>>;
 
         IndexMap                 _index;
         int                      _attribLocation;
         std::string              _oidUniformName;
-        mutable Threading::Mutex _mutex;
-        OpenThreads::Atomic      _idGen;
+        mutable std::mutex _mutex;
+        std::atomic_int          _idGen;
         ShaderPackage            _shaders;
         std::string              _attribName;
 

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -16,41 +16,35 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
-
-#ifndef OSGEARTH_COMMON_H
-#define OSGEARTH_COMMON_H 1
+#pragma once
 
 #include <osgEarth/Export>
 #include <osgEarth/Notify>
-#include <osg/Version>
+#include <osgEarth/BuildConfig>
 #include <osg/ref_ptr>
+#include <osg/Referenced>
+#include <memory>
 
-// define the OSG Version checks for older OSG versions
+namespace osg {
+    class ArgumentParser;
+}
 
-#ifndef OSG_MIN_VERSION_REQUIRED
-#  define OSG_MIN_VERSION_REQUIRED(MAJOR, MINOR, PATCH) ((OPENSCENEGRAPH_MAJOR_VERSION>MAJOR) || (OPENSCENEGRAPH_MAJOR_VERSION==MAJOR && (OPENSCENEGRAPH_MINOR_VERSION>MINOR || (OPENSCENEGRAPH_MINOR_VERSION==MINOR && OPENSCENEGRAPH_PATCH_VERSION>=PATCH))))
-#  define OSG_VERSION_LESS_THAN(MAJOR, MINOR, PATCH) ((OPENSCENEGRAPH_MAJOR_VERSION<MAJOR) || (OPENSCENEGRAPH_MAJOR_VERSION==MAJOR && (OPENSCENEGRAPH_MINOR_VERSION<MINOR || (OPENSCENEGRAPH_MINOR_VERSION==MINOR && OPENSCENEGRAPH_PATCH_VERSION<PATCH))))
-#  define OSG_VERSION_LESS_OR_EQUAL(MAJOR, MINOR, PATCH) ((OPENSCENEGRAPH_MAJOR_VERSION<MAJOR) || (OPENSCENEGRAPH_MAJOR_VERSION==MAJOR && (OPENSCENEGRAPH_MINOR_VERSION<MINOR || (OPENSCENEGRAPH_MINOR_VERSION==MINOR && OPENSCENEGRAPH_PATCH_VERSION<=PATCH))))
-#  define OSG_VERSION_GREATER_THAN(MAJOR, MINOR, PATCH) ((OPENSCENEGRAPH_MAJOR_VERSION>MAJOR) || (OPENSCENEGRAPH_MAJOR_VERSION==MAJOR && (OPENSCENEGRAPH_MINOR_VERSION>MINOR || (OPENSCENEGRAPH_MINOR_VERSION==MINOR && OPENSCENEGRAPH_PATCH_VERSION>PATCH))))
-#  define OSG_VERSION_GREATER_OR_EQUAL(MAJOR, MINOR, PATCH) ((OPENSCENEGRAPH_MAJOR_VERSION>MAJOR) || (OPENSCENEGRAPH_MAJOR_VERSION==MAJOR && (OPENSCENEGRAPH_MINOR_VERSION>MINOR || (OPENSCENEGRAPH_MINOR_VERSION==MINOR && OPENSCENEGRAPH_PATCH_VERSION>=PATCH))))
-#endif
-
-// text inlining macro
-#define OE_MULTILINE(...) #__VA_ARGS__
+#define OE_COMMENT(STR)
 
 /** osgEarth core */
 namespace osgEarth
 {
     // application-wide unique ID.
-    typedef int UID;
+    using UID = int;
 
-    // reference counted unique UID.
-    struct OSGEARTH_EXPORT RefUID : public osg::Referenced {
-        RefUID() : _uid(0) { }
-        RefUID(UID uid) : _uid(uid) { }
-        operator UID() const { return _uid; }
-        UID _uid;
-    };
+    //! Global initializer for osgEarth - call this if you are setting up
+    //! windows and views prior to using osgEarth
+    extern OSGEARTH_EXPORT void initialize();
+
+    extern OSGEARTH_EXPORT void initialize(osg::ArgumentParser&);
+
+    //! Generate an application-wide unique identifier.
+    extern OSGEARTH_EXPORT UID createUID();
 }
 
 #ifdef _MSC_VER
@@ -59,4 +53,7 @@ namespace osgEarth
 #pragma warning (disable: 4180)
 #endif
 
-#endif // OSGEARTH_COMMON_H
+// Sringification
+#define OE_STRINGIFY_0(x) #x
+#define OE_STRINGIFY(x) OE_STRINGIFY_0(x)
+

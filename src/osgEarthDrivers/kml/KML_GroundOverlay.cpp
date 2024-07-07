@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -18,10 +18,10 @@
  */
 #include "KML_GroundOverlay"
 #include "KML_Geometry"
-#include <osgEarthAnnotation/ImageOverlay>
+#include <osgEarth/ImageOverlay>
 
 using namespace osgEarth_kml;
-using namespace osgEarth::Annotation;
+using namespace osgEarth;
 
 void
 KML_GroundOverlay::scan( xml_node<>* node, KMLContext& cx )
@@ -66,8 +66,9 @@ KML_GroundOverlay::build( xml_node<>* node, KMLContext& cx )
             return;
         }
 
-        im = new ImageOverlay( cx._mapNode, image.get() );
-        im->setBoundsAndRotation( Bounds(west, south, east, north), rotation );
+        //im = new ImageOverlay( cx._mapNode, image.get() );
+        im = new ImageOverlay(nullptr, image.get());
+        im->setBoundsAndRotation( Bounds(west, south, 0, east, north, 0), rotation );
         cx._groupStack.top()->addChild( im );
     }
     else if (llab)
@@ -85,8 +86,8 @@ KML_GroundOverlay::build( xml_node<>* node, KMLContext& cx )
             return;
         }
 
-        im = new ImageOverlay(cx._mapNode, image.get());
-        im->setBoundsAndRotation(Bounds(west, south, east, north), rotation);
+        im = new ImageOverlay(nullptr, image.get());
+        im->setBoundsAndRotation(Bounds(west, south, 0, east, north, 0), rotation);
         cx._groupStack.top()->addChild(im);
     }
 
@@ -105,7 +106,7 @@ KML_GroundOverlay::build( xml_node<>* node, KMLContext& cx )
             }
 
             const Geometry& p = *(g._geom.get());
-            im = new ImageOverlay( cx._mapNode, image.get() );
+            im = new ImageOverlay(nullptr, image.get() );
             im->setCorners( 
                 osg::Vec2d( p[0].x(), p[0].y() ),
                 osg::Vec2d( p[1].x(), p[1].y() ),

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -22,8 +22,10 @@
 #include <osgEarth/Clamping>
 #include <osgEarth/CullingUtils>
 #include <osgEarth/LineDrawable>
+#include <osgEarth/Notify>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 int         Clamping::AnchorAttrLocation        = osg::Drawable::ATTRIBUTE_6;
 int         Clamping::HeightsAttrLocation       = osg::Drawable::FOG_COORDS;
@@ -50,6 +52,23 @@ namespace
             setNodeMaskOverride( ~0 );
         }
 
+        void apply(osg::Drawable& drawable) override
+        {
+            osg::Geometry* geom = drawable.asGeometry();
+            if (geom)
+            {
+                applyGeometry(geom);
+            }
+            else
+            {
+                LineDrawable* line = dynamic_cast<LineDrawable*>(&drawable);
+                if (line)
+                {
+                    applyLineDrawable(line);
+                }
+            }
+        }
+
         void applyGeometry(osg::Geometry* geom)
         {
             osg::Vec3Array* verts = static_cast<osg::Vec3Array*>(geom->getVertexArray());
@@ -66,12 +85,23 @@ namespace
             geom->setVertexAttribArray(Clamping::AnchorAttrLocation, anchors);
         }
 
-        void apply(osg::Drawable& drawable)
+        void applyLineDrawable(LineDrawable* line)
         {
-            osg::Geometry* geom = drawable.asGeometry();
-            if (geom)
+            osg::ref_ptr<osg::Vec4Array> anchors = new osg::Vec4Array();
+            anchors->setBinding(osg::Array::BIND_PER_VERTEX);
+            anchors->reserve(line->getNumVerts());
+            line->setVertexAttribArray(Clamping::AnchorAttrLocation, anchors.get());
+
+            for (unsigned i = 0; i < line->getNumVerts(); ++i)
             {
-                applyGeometry(geom);
+                const osg::Vec3& vert = line->getVertex(i);
+
+                line->pushVertexAttrib(
+                    anchors.get(), 
+                    osg::Vec4f(
+                        vert.x(), vert.y(),
+                        _verticalOffset,
+                        Clamping::ClampToGround));
             }
         }
     };
@@ -88,42 +118,34 @@ Clamping::applyDefaultClampingAttrs(osg::Node* node, float verticalOffset)
 }
 
 void
-Clamping::applyDefaultClampingAttrs(osg::Geometry* geom, float verticalOffset)
-{
-    if ( geom )
-    {
-        ApplyDefaultsVisitor visitor( verticalOffset );
-        visitor.apply( *geom );
-    }
-}
-
-
-void
 Clamping::installHasAttrsUniform(osg::StateSet* stateset)
 {
     if ( stateset )
     {
         stateset->setDefine("OE_CLAMP_HAS_ATTRIBUTES");
-        //stateset->addUniform( new osg::Uniform(Clamping::HasAttrsUniformName, true) );
     }
 }
 
 void
-Clamping::setHeights(osg::Geometry* geom, osg::FloatArray* hats)
+Clamping::setHeights(osg::Node* node, osg::FloatArray* hats)
 {
-    if ( geom )
+    if (node)
     {
         hats->setBinding(osg::Array::BIND_PER_VERTEX);
         hats->setNormalize(false);
 
-        LineDrawable* line = dynamic_cast<LineDrawable*>(geom);
+        LineDrawable* line = dynamic_cast<LineDrawable*>(node);
         if (line)
         {
             line->importVertexAttribArray(HeightsAttrLocation, hats);
         }
         else
         {
-            geom->setVertexAttribArray(HeightsAttrLocation, hats);
+            osg::Geometry* geom = node->asGeometry();
+            if (geom)
+            {
+                geom->setVertexAttribArray(HeightsAttrLocation, hats);
+            }
         }
     }
 }
@@ -244,6 +266,11 @@ ClampingCullSet::accept(osg::NodeVisitor& nv)
         // mark this set so it will reset for the next frame
         _frameCulled = true;
     }
+}
+
+ClampingManager::ClampingManager()
+{
+    //nop
 }
 
 ClampingCullSet&

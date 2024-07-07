@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -18,15 +18,14 @@
  */
 #include "KML_Model"
 
-#include <osgEarthSymbology/ModelSymbol>
+#include <osgEarth/ModelSymbol>
 
 using namespace osgEarth_kml;
-using namespace osgEarth::Symbology;
 
 void
 KML_Model::parseCoords( xml_node<>* node, KMLContext& cx )
 {
-    PointSet* point = new PointSet();
+    Point* point = new Point();
 
     xml_node<>* location = node->first_node("location", 0, false);
     if (location)
@@ -34,7 +33,7 @@ KML_Model::parseCoords( xml_node<>* node, KMLContext& cx )
         double latitude  = as<double>(getValue(location, "latitude"), 0.0);
         double longitude = as<double>(getValue(location, "longitude"), 0.0);
         double altitude  = as<double>(getValue(location, "altitude"), 0.0);
-        point->push_back( osg::Vec3d(longitude, latitude, altitude));
+        point->set( osg::Vec3d(longitude, latitude, altitude));
     }    
     _geom = point;
 }
@@ -48,8 +47,8 @@ KML_Model::parseStyle(xml_node<>* node, KMLContext& cx, Style& style)
     if ( !url.empty() )
     {
         if ( !model ) model = style.getOrCreate<ModelSymbol>();
-        model->url()->setLiteral( url );
-        model->url()->setURIContext( URIContext(cx._referrer) );
+        model->url().mutable_value().setLiteral( url );
+        model->url().mutable_value().setURIContext( URIContext(cx._referrer) );
 
     }
 
@@ -90,7 +89,7 @@ KML_Model::parseStyle(xml_node<>* node, KMLContext& cx, Style& style)
             if ( !source.empty() || !target.empty() )
             {
                 if ( !model ) model = style.getOrCreate<ModelSymbol>();
-                model->uriAliasMap()->insert( source, target );
+                model->uriAliasMap().mutable_value().insert( source, target );
             }
 		}
     }

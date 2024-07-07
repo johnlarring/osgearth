@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -21,14 +21,14 @@
 
 #include <osgEarth/Common>
 #include <osgEarth/TileKey>
-#include <osgEarth/ThreadingUtils>
-#include <osgEarth/TerrainOptions>
+#include <osgEarth/Threading>
 #include <osg/OperationThread>
 #include <osg/View>
 
 namespace osgEarth
 {
     class Terrain;
+    class TerrainTile;
     class SpatialReference;
 
     /**
@@ -78,13 +78,24 @@ namespace osgEarth
          * @param context
          *      Contextual information about the callback
          */
+        virtual void onTileUpdate(
+            const TileKey&          key, 
+            osg::Node*              graph, 
+            TerrainCallbackContext& context)
+        {
+            // back compat only
+            onTileAdded(key, graph, context);
+        }
+
+        /** dtor */
+        virtual ~TerrainCallback() { }
+
+    public: // deprecated - exists for backwards compatibilty only
+
         virtual void onTileAdded(
             const TileKey&          key, 
             osg::Node*              graph, 
             TerrainCallbackContext& context) { }
-
-        /** dtor */
-        virtual ~TerrainCallback() { }
     };
 
 
@@ -99,13 +110,13 @@ namespace osgEarth
     {
     public:
         TerrainCallbackAdapter(T* t) : _t(t) { }
-        void onTileAdded(const TileKey&          key, 
+        void onTileUpdate(const TileKey&          key, 
                          osg::Node*              tile, 
                          TerrainCallbackContext& context)
         {
             osg::ref_ptr<T> t;
             if (_t.lock(t))
-                t->onTileAdded(key, tile, context);
+                t->onTileUpdate(key, tile, context);
             else
                 context.remove();
         }
@@ -167,6 +178,27 @@ namespace osgEarth
          */
         const SpatialReference* getSRS() const { return _profile->getSRS(); }
 
+        /**
+         * Returns the world coordinates under the mouse.
+         * @param view
+         *      View in which to do the query
+         * @param mx, my
+         *      Mouse coordinates
+         * @param out_coords
+         *      Stores the world coordinates under the mouse (when returning true)
+         */
+        bool getWorldCoordsUnderMouse(
+            osg::View*  view,
+            float       mx,
+            float       my,
+            osg::Vec3d& out_world) const;
+
+        //! Terrain Tile node under the mouse
+        TerrainTile* getTerrainTileUnderMouse(
+            osg::View*  view,
+            float       mx,
+            float       my) const;
+
 
     public: // TerrainResolver interface
 
@@ -203,30 +235,6 @@ namespace osgEarth
             double*                 out_heightAboveEllipsoid =0L) const;
 
     public:
-
-        /**
-         * Returns the world coordinates under the mouse.
-         * @param view
-         *      View in which to do the query
-         * @param mx, my
-         *      Mouse coordinates
-         * @param out_coords 
-         *      Stores the world coordinates under the mouse (when returning true)
-         */
-        bool getWorldCoordsUnderMouse(
-            osg::View*  view,
-            float       mx,
-            float       my,
-            osg::Vec3d& out_world ) const;
-
-        //bool getWorldCoordsUnderMouse(
-        //    osg::View*  view,
-        //    float       mx,
-        //    float       my,
-        //    osg::Vec3d& out_world,
-        //    osg::ref_ptr<osg::Node>& out_node ) const;
-
-    public:
         /**
          * Adds a terrain callback.
          *
@@ -252,8 +260,8 @@ namespace osgEarth
         // access the raw terrain graph
         osg::Node* getGraph() const { return _graph.get(); }
         
-        // queues the onTileAdded callback (internal)
-        void notifyTileAdded( const TileKey& key, osg::Node* tile );
+        // queues the onTileUpdate callback (internal)
+        void notifyTileUpdate( const TileKey& key, osg::Node* tile );
 
         // queues the onTileRemoved callback (internal)
         void notifyTilesRemoved(const std::vector<TileKey>& keys);
@@ -265,7 +273,8 @@ namespace osgEarth
         virtual ~Terrain() { }
 
     private:
-        Terrain( osg::Node* graph, const Profile* profile, const TerrainOptions& options );
+        //! Construct the Terrain graph interface
+        Terrain(osg::Node* graph, const Profile* profile);
 
         /** update traversal. */
         void update();
@@ -276,24 +285,23 @@ namespace osgEarth
 
         CallbackList                 _callbacks;
         Threading::ReadWriteMutex    _callbacksMutex;
-        OpenThreads::Atomic          _callbacksSize; // separate size tracker for MT size check w/o a lock
+        std::atomic_int              _callbacksSize; // separate size tracker for MT size check w/o a lock
 
         osg::ref_ptr<const Profile>  _profile;
         osg::observer_ptr<osg::Node> _graph;
-        const TerrainOptions&        _terrainOptions;
 
         osg::ref_ptr<osg::OperationQueue> _updateQueue;
         
         void fireMapElevationChanged();
-        void fireTileAdded( const TileKey& key, osg::Node* tile );
+        void fireTileUpdate( const TileKey& key, osg::Node* tile );
         void fireTilesRemoved(const std::vector<TileKey>& keys);
 
-        struct OnTileAddedOperation : public osg::Operation {
+        struct onTileUpdateOperation : public osg::Operation {
             osg::observer_ptr<Terrain> _terrain;
             TileKey _key;
             osg::observer_ptr<osg::Node> _node;
             unsigned _count;
-            OnTileAddedOperation(const TileKey& key, osg::Node* node, Terrain* terrain);
+            onTileUpdateOperation(const TileKey& key, osg::Node* node, Terrain* terrain);
             void operator()(osg::Object*);
             int _delay;
         };

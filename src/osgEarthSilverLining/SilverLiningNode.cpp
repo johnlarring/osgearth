@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -44,16 +44,6 @@ _callback(callback)
     construct();
 }
 
-// DEPRECATED
-SilverLiningNode::SilverLiningNode(const osgEarth::SpatialReference* mapSRS,
-                                   const SilverLiningOptions& options,
-                                   Callback*                  callback) :
-_options(options),
-_callback(callback)
-{
-    construct();
-}
-
 void
 SilverLiningNode::construct()
 {
@@ -67,13 +57,14 @@ SilverLiningNode::construct()
     _lightSource = new osg::LightSource();
     _lightSource->setLight( _light.get() );
     _lightSource->setReferenceFrame(osg::LightSource::RELATIVE_RF);
-    GenerateGL3LightingUniforms generateLightingVisitor;
-    _lightSource->accept(generateLightingVisitor);
+    //GenerateGL3LightingUniforms generateLightingVisitor;
+    //_lightSource->accept(generateLightingVisitor);
+    _lightSource->setCullingActive(false);
+    _lightSource->addCullCallback(new LightSourceGL3UniformGenerator());
 
     // scene lighting
     osg::StateSet* stateset = this->getOrCreateStateSet();
-    _lighting = new PhongLightingEffect();
-    //_lighting->setCreateLightingUniform( false );
+    _lighting = new Util::PhongLightingEffect();
     _lighting->attach( stateset );
 
     // need update traversal.
@@ -90,9 +81,9 @@ void
 SilverLiningNode::attach(osg::View* view, int lightNum)
 {
     _light->setLightNum( lightNum );
-    //view->setLight( _light.get() );
-    //view->setLightingMode( osg::View::SKY_LIGHT );
     view->setLightingMode(osg::View::NO_LIGHT);
+    view->setLight(_light.get());
+    onSetDateTime();
 }
 
 unsigned
@@ -139,22 +130,9 @@ SilverLiningNode::onSetDateTime()
 }
 
 void
-SilverLiningNode::onSetMinimumAmbient()
-{
-    for (CameraContextMap::const_iterator itr = _contexts.begin();
-        itr != _contexts.end();
-        ++itr)
-    {
-        SilverLiningContextNode* node = dynamic_cast<SilverLiningContextNode* > ((*itr).second.get());
-        if(node)
-            node->onSetMinimumAmbient();
-    }
-}
-
-void
 SilverLiningNode::traverse(osg::NodeVisitor& nv)
 {
-    static Threading::Mutex s_mutex;
+    static std::mutex s_mutex;
 
     if ( nv.getVisitorType() == nv.CULL_VISITOR )
     {
@@ -162,7 +140,7 @@ SilverLiningNode::traverse(osg::NodeVisitor& nv)
         osg::Camera* camera = cv->getCurrentCamera();
         if ( camera )
         {
-            Threading::ScopedMutexLock lock(s_mutex);
+            std::lock_guard<std::mutex> lock(s_mutex);
 
             CameraContextMap::const_iterator i = _contexts.find(camera);
             if (i == _contexts.end())
@@ -180,7 +158,7 @@ SilverLiningNode::traverse(osg::NodeVisitor& nv)
     else if (nv.getVisitorType() == nv.UPDATE_VISITOR)
     {
         {
-            Threading::ScopedMutexLock lock(s_mutex);
+            std::lock_guard<std::mutex> lock(s_mutex);
             if (!_camerasToAdd.empty())
             {
                 for (CameraSet::const_iterator i = _camerasToAdd.begin(); i != _camerasToAdd.end(); ++i)
@@ -201,7 +179,7 @@ SilverLiningNode::traverse(osg::NodeVisitor& nv)
 
     else
     {
-        Threading::ScopedMutexLock lock(s_mutex);
+        std::lock_guard<std::mutex> lock(s_mutex);
         for (CameraContextMap::const_iterator i = _contexts.begin(); i != _contexts.end(); ++i)
         {
             i->second->accept(nv);
@@ -213,5 +191,5 @@ SilverLiningNode::traverse(osg::NodeVisitor& nv)
         _lightSource->accept(nv);
     }
 
-    osgEarth::Util::SkyNode::traverse(nv);
+    osgEarth::SkyNode::traverse(nv);
 }

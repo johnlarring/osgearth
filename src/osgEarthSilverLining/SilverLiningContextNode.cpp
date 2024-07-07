@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -48,7 +48,7 @@ _lastAltitude(DBL_MAX)
     _SL = new SilverLiningContext( options );
     _SL->setLight( light);
     _SL->setCallback( callback );
-    _SL->setMinimumAmbient( node->getMinimumAmbient() );
+    _SL->setMinimumAmbient( light->getAmbient() );
 
     // Geode to hold each of the SL drawables:
     _geode = new osg::Geode();
@@ -84,12 +84,6 @@ SilverLiningContextNode::onSetDateTime()
     ::SilverLining::LocalTime utcTime;
     utcTime.SetFromEpochSeconds( _silverLiningNode->getDateTime().asTimeStamp() );
     _SL->getAtmosphere()->GetConditions()->SetTime( utcTime );
-}
-
-void
-SilverLiningContextNode::onSetMinimumAmbient()
-{
-    _SL->setMinimumAmbient( _silverLiningNode->getMinimumAmbient() );
 }
 
 void
@@ -134,7 +128,7 @@ SilverLiningContextNode::traverse(osg::NodeVisitor& nv)
 					_SL->setCameraPosition( nv.getEyePoint() );
 
 					_lastAltitude = _SL->getSRS()->isGeographic() ?
-						cv->getEyePoint().length() - _SL->getSRS()->getEllipsoid()->getRadiusEquator() :
+						cv->getEyePoint().length() - _SL->getSRS()->getEllipsoid().getRadiusEquator() :
 					cv->getEyePoint().z();
 
 					_SL->updateLocation();

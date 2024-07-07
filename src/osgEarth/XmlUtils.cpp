@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -19,12 +19,16 @@
 
 #include <osgEarth/XmlUtils>
 
-#include "tinyxml.h"
+#include "tinyxml/tinyxml.h"
 
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
-static std::string EMPTY_VALUE = "";
+namespace
+{
+    static std::string EMPTY_VALUE = "";
+}
 
 XmlNode::XmlNode()
 {
@@ -62,12 +66,14 @@ XmlElement::XmlElement( const Config& conf )
 
         for( ConfigSet::const_iterator j = conf.children().begin(); j != conf.children().end(); j++ )
         {
-            //if ( j->isSimple() )
-            //{
-            //    attrs[j->key()] = j->value();
-            //}
-
-            children.push_back( new XmlElement(*j) );
+            if (j->isSimple() && j->key() == "name")
+            {
+                attrs[j->key()] = j->value();
+            }
+            else
+            {
+                children.push_back( new XmlElement(*j) );
+            }
         }
     }
 }
@@ -241,8 +247,8 @@ XmlElement::getConfig(const std::string& referrer) const
 
         URIContext uriContext(referrer);
         URI uri(href, uriContext);
-        std::string fullURI = uri.full();
-        OE_INFO << "Loading href from " << fullURI << std::endl;
+        const std::string& fullURI = uri.full();
+        //OE_DEBUG << "Loading href from " << fullURI << std::endl;
 
         osg::ref_ptr< XmlDocument > doc = XmlDocument::load(fullURI);
         if (doc && doc->getChildren().size() > 0)
@@ -250,6 +256,16 @@ XmlElement::getConfig(const std::string& referrer) const
             Config conf = static_cast<XmlElement*>(doc->children.front().get())->getConfig( fullURI );
             conf.setExternalRef( href ); //fullURI );
             conf.setReferrer( fullURI );
+
+            // copy over include attrs (not spec), overwriting anything in the incoming conf
+            for (auto& attr : getAttrs())
+            {
+                if (attr.first != "href")
+                {
+                    conf.set(attr.first, attr.second);
+                }
+            }
+
             return conf;
         }
         else
@@ -275,7 +291,7 @@ XmlElement::getConfig(const std::string& referrer) const
 				conf.add( static_cast<const XmlElement*>(n)->getConfig(referrer) );
 		}
 
-		conf.value() = getText();
+		conf.setValue(getText());
 		//else 
 		//    conf.value() = trim( static_cast<const XmlText*>(n)->getValue() );
 		return conf;
@@ -451,12 +467,21 @@ XmlDocument::load( std::istream& in, const URIContext& uriContext )
     if ( xmlDoc.Error() )
     {
         std::stringstream buf;
-        buf << xmlDoc.ErrorDesc() << " (row " << xmlDoc.ErrorRow() << ", col " << xmlDoc.ErrorCol() << ")";
-        std::string str;
-        str = buf.str();
-        OE_WARN << "Error in XML document: " << str << std::endl;
-        if ( !uriContext.referrer().empty() )
-            OE_WARN << uriContext.referrer() << std::endl;
+        buf << "XML parsing error";
+        if (!uriContext.referrer().empty())
+            buf << " in \"" <<  uriContext.referrer() << "\"";
+        OE_WARN << buf.str() << std::endl;
+        OE_WARN << xmlDoc.ErrorDesc() << " (row " << xmlDoc.ErrorRow() << ", col " << xmlDoc.ErrorCol() << ")" << std::endl;
+
+        // print some context
+        StringVector output;
+        StringTokenizer lines(xmlStr, output, "\n", "", true, false);
+        int startLine = osg::maximum(0, xmlDoc.ErrorRow()-12);
+        int endLine = osg::minimum((int)(output.size())-1, xmlDoc.ErrorRow()+4);
+        for(int i=startLine; i<=endLine; ++i)
+        {
+            OE_WARN << " " << i+1 << (i+1 == xmlDoc.ErrorRow()? " *":"  ") << "\t" << output[i] << std::endl;
+        }
     }
 
     if ( !xmlDoc.Error() && xmlDoc.RootElement() )
@@ -476,45 +501,50 @@ XmlDocument::getConfig() const
     return conf;
 }
 
-static void
-storeNode( const XmlNode* node, TiXmlNode* parent)
+namespace
 {
-    if (node->isElement())
+    void storeNode(const XmlNode* node, TiXmlNode* parent)
     {
-        XmlElement* e = (XmlElement*)node;
-        TiXmlElement* element = new TiXmlElement( e->getName().c_str() );
-        //Write out all the attributes
-        for( XmlAttributes::iterator a = e->getAttrs().begin(); a != e->getAttrs().end(); a++ )
+        if (node->isElement())
         {
-            element->SetAttribute(a->first.c_str(), a->second.c_str() );            
-        }
+            XmlElement* e = (XmlElement*)node;
+            TiXmlElement* element = new TiXmlElement(e->getName().c_str());
+            //Write out all the attributes
+            for (XmlAttributes::iterator a = e->getAttrs().begin(); a != e->getAttrs().end(); a++)
+            {
+                element->SetAttribute(a->first.c_str(), a->second.c_str());
+            }
 
-        //Write out all the child nodes
-        for( XmlNodeList::iterator i = e->getChildren().begin(); i != e->getChildren().end(); i++ )
+            //Write out all the child nodes
+            for (XmlNodeList::iterator i = e->getChildren().begin(); i != e->getChildren().end(); i++)
+            {
+                storeNode(i->get(), element);
+            }
+            parent->LinkEndChild(element);
+        }
+        else if (node->isText())
         {
-            storeNode( i->get(), element );
+            XmlText* t = (XmlText*)node;
+            std::string value = t->getValue();
+
+            //std::string encodedValue;
+            TiXmlString rawValue(value.c_str());
+            TiXmlString encodedValue;
+            TiXmlBase::EncodeString(rawValue, &encodedValue);
+
+            bool needCDATA = !encodedValue.empty() && (std::string(encodedValue.c_str()) != value);
+
+            TiXmlText* tNode = new TiXmlText(value.c_str());
+            if (needCDATA)
+            {
+                // XML should be normalized to LF (no CRLF)
+                value = osgEarth::replaceIn(value, "\r\n", "\n");
+                tNode->SetValue(value.c_str());
+                tNode->SetCDATA(true);
+            }
+
+            parent->LinkEndChild(tNode);
         }
-        parent->LinkEndChild( element );
-    }
-    else if (node->isText())
-    {
-        XmlText* t = (XmlText*)node;
-        std::string value = t->getValue();
-
-        std::string encodedValue;
-		TiXmlBase::EncodeString(value, &encodedValue);
-        bool needCDATA = !encodedValue.empty() && encodedValue != value;
-
-        TiXmlText* tNode = new TiXmlText(value.c_str());
-        if (needCDATA)
-        {
-            // XML should be normalized to LF (no CRLF)
-            value = osgEarth::replaceIn(value, "\r\n", "\n");
-            tNode->SetValue(value.c_str());
-            tNode->SetCDATA(true);
-        }
-
-        parent->LinkEndChild(tNode);
     }
 }
 

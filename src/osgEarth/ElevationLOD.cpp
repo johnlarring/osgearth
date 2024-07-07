@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -18,6 +18,7 @@
  */
 #include <osgEarth/ElevationLOD>
 #include <osgEarth/CullingUtils>
+#include <osgEarth/Utils>
 
 using namespace osgEarth;
 
@@ -138,8 +139,8 @@ void ElevationLOD::traverse( osg::NodeVisitor& nv)
 
                 osg::Vec3d eye = cv->getViewPoint();
 
-                Horizon* horizon = Horizon::get(nv);
-                if (horizon)
+                osg::ref_ptr<Horizon> horizon;
+                if (ObjectStorage::get(&nv, horizon))
                 {
                     double R = horizon->getRadius();
                     alt = eye.length() - R;

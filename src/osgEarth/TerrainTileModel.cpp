@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2014 Pelican Mapping
 * http://osgearth.org
 *
@@ -17,79 +17,104 @@
 * along with this program.  If not, see <http://www.gnu.org/licenses/>
 */
 #include <osgEarth/TerrainTileModel>
+#include <osgUtil/IncrementalCompileOperation>
 
 using namespace osgEarth;
 
 #undef  LC
 #define LC "[TerrainTileModel] "
 
-//...................................................................
-
-TerrainTileLayerModel::TerrainTileLayerModel()
+namespace
 {
+    // adapter that lets us compile a Texture::Ptr using the ICO
+    struct TextureICOAdapter : public osg::Texture2D
+    {
+        osgEarth::Texture::WeakPtr _tex_weak;
+        osg::observer_ptr<osg::Object> _token;
+        bool _hasToken = false;
+
+        TextureICOAdapter(osgEarth::Texture::Ptr value, osg::Object* cancelation_token) :
+            _tex_weak(value),
+            _token(cancelation_token),
+            _hasToken(cancelation_token != nullptr) { }
+
+        // apply is called by the ICO for textures (not compileGLObjects)
+        void apply(osg::State& state) const override
+        {
+            // cancelation check:
+            if (_hasToken && !_token.valid())
+            {
+                //OE_WARN << "Canceled ICO for " << _tex->name() << std::endl;
+                return;
+            }
+
+            osgEarth::Texture::Ptr tex = _tex_weak.lock();
+            if (tex)
+            {
+                if (tex->compileGLObjects(state))
+                {
+                    //OE_WARN << "Compiled ICO = " << _tex->name() << (std::uintptr_t)_tex.get() << std::endl;
+                }
+            }
+        }
+    };
 }
 
 //...................................................................
-
-TerrainTileElevationModel::TerrainTileElevationModel() :
-_minHeight( FLT_MAX ),
-_maxHeight(-FLT_MAX )
-{
-    //NOP
-}
-
-//...................................................................
-
-TerrainTileModel::TerrainTileModel(const TileKey&  key,
-                                   const Revision& revision) :
-_key                   ( key ),
-_revision              ( revision ),
-_requiresUpdateTraverse( false )
-{
-    //NOP
-}
-
-osg::Texture* 
-TerrainTileModel::getNormalTexture() const
-{
-    return _normalLayer.valid() ? _normalLayer->getTexture() : 0L;
-}
-
-osg::RefMatrixf* 
-TerrainTileModel::getNormalTextureMatrix() const
-{
-    return _normalLayer.valid() ? _normalLayer->getMatrix() : 0L;
-}
-
-osg::Texture* 
-TerrainTileModel::getElevationTexture() const
-{
-    return _elevationLayer.valid() ? _elevationLayer->getTexture() : 0L;
-}
-
-osg::RefMatrixf* 
-TerrainTileModel::getElevationTextureMatrix() const
-{
-    return _elevationLayer.valid() ? _elevationLayer->getMatrix() : 0L;
-}
 
 void
-TerrainTileModel::compileGLObjects(osg::State& state) const
+TerrainTileModel::getStateToCompile(osgUtil::StateToCompile& out, bool bindless, osg::Object* token) const
 {
-    for (TerrainTileColorLayerModelVector::const_iterator i = _colorLayers.begin();
-        i != _colorLayers.end();
-        ++i)
+    for (auto& colorLayer : colorLayers)
     {
-        if (i->get()->getTexture())
-            i->get()->getTexture()->compileGLObjects(state);
+        if (colorLayer.texture)
+        {
+            out._textures.insert(bindless ?
+                new TextureICOAdapter(colorLayer.texture, token) :
+                colorLayer.texture->osgTexture().get());
+        }
     }
 
-    // since non-core shared layers are ALSO in the colorLayers vector,
-    // there is no need to iterator over them.
+    if (normalMap.texture)
+    {
+        out._textures.insert(bindless ?
+            new TextureICOAdapter(normalMap.texture, token) :
+            normalMap.texture->osgTexture().get());
+    }
 
-    if (getNormalTexture())
-        getNormalTexture()->compileGLObjects(state);
+    if (elevation.texture)
+    {
+        out._textures.insert(bindless ?
+            new TextureICOAdapter(elevation.texture, token) :
+            elevation.texture->osgTexture().get());
+    }
 
-    if (getElevationTexture())
-        getElevationTexture()->compileGLObjects(state);
+    if (landCover.texture)
+    {
+        out._textures.insert(bindless ?
+            new TextureICOAdapter(landCover.texture, token) :
+            landCover.texture->osgTexture().get());
+    }
+}
+
+Texture::Ptr
+TerrainTileModel::getTexture(UID layerUID) const
+{
+    for (auto& colorLayer : colorLayers)
+        if (colorLayer.layer && colorLayer.layer->getUID() == layerUID)
+            return colorLayer.texture;
+
+    return nullptr;
+}
+
+const osg::Matrixf&
+TerrainTileModel::getMatrix(UID layerUID) const
+{
+    static osg::Matrixf s_identity;
+
+    for (auto& colorLayer : colorLayers)
+        if (colorLayer.layer && colorLayer.layer->getUID() == layerUID)
+            return colorLayer.matrix;
+
+    return s_identity;
 }

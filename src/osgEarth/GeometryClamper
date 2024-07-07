@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -27,12 +27,11 @@
 #include <osg/NodeVisitor>
 #include <osg/fast_back_stack>
 
-namespace osgEarth
+namespace osgEarth { namespace Util
 {
     /**
      * Utility that takes existing OSG geometry and modifies it so that
      * it "conforms" with a terrain patch.
-     * TODO: Consider relocating this into Annotation namespace
      */
     class OSGEARTH_EXPORT GeometryClamper : public osg::NodeVisitor
     {
@@ -43,7 +42,7 @@ namespace osgEarth
             friend class GeometryClamper;
         };
 
-        typedef std::map<osg::Array*, GeometryData> LocalData;      
+        using LocalData = std::unordered_map<osg::Drawable*, GeometryData>;
 
     public:
         //! Construct a geometry clamper, passing in a data structure managed
@@ -107,7 +106,7 @@ namespace osgEarth
 
     public: // TerrainCallback
         
-        virtual void onTileAdded(
+        virtual void onTileUpdate(
             const TileKey&          key, 
             osg::Node*              tile, 
             TerrainCallbackContext& context);
@@ -116,6 +115,6 @@ namespace osgEarth
         GeometryClamper _clamper;
     };
 
-} // namespace osgEarth
+} }
 
 #endif // OSGEARTH_GEOMETRY_CLAMPER

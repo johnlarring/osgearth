@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -52,8 +52,10 @@ KML_Feature::build( xml_node<>* node, KMLContext& cx, osg::Node* working )
     {
         // parse the visibility to show/hide the item by default:
 		std::string visibility = getValue(node, "visibility");
-        if ( !visibility.empty() )
-            working->setNodeMask( as<int>(visibility, 1) == 1 ? ~0 : 0 );
+        if (visibility == "1" || ciEquals(visibility, "true"))
+            working->setNodeMask(~0);
+        else if (visibility == "0" || ciEquals(visibility, "false"))
+            working->setNodeMask(0);
 
         // parse a "LookAt" element (stores a viewpoint)
         AnnotationData* anno = getOrCreateAnnotationData(working);
@@ -73,9 +75,9 @@ KML_Feature::build( xml_node<>* node, KMLContext& cx, osg::Node* working )
 				as<double>(getValue(lookat, "altitude"), 0.0),
                 ALTMODE_ABSOLUTE );
 
-            vp.heading() =  as<double>(getValue(lookat, "heading"), 0.0);
-            vp.pitch()   = -as<double>(getValue(lookat, "tilt"), 45.0),
-            vp.range()   =  as<double>(getValue(lookat, "range"), 10000.0);
+            vp.heading() = Angle(as<double>(getValue(lookat, "heading"), 0.0), Units::DEGREES);
+            vp.pitch() = Angle(-as<double>(getValue(lookat, "tilt"), 45.0), Units::DEGREES);
+            vp.range() = Distance(as<double>(getValue(lookat, "range"), 10000.0), Units::METERS);
 
             anno->setViewpoint( vp );
         }

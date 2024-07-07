@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -26,9 +26,10 @@
 #define LC "[CacheSeed] "
 
 using namespace osgEarth;
-using namespace OpenThreads;
+using namespace osgEarth::Contrib;
+using namespace osgEarth::Util;
 
-CacheTileHandler::CacheTileHandler( TerrainLayer* layer, const Map* map ):
+CacheTileHandler::CacheTileHandler( TileLayer* layer, const Map* map ):
 _layer( layer ),
 _map( map )
 {
@@ -113,7 +114,7 @@ void CacheSeed::setVisitor(TileVisitor* visitor)
     _visitor = visitor;
 }
 
-void CacheSeed::run( TerrainLayer* layer, const Map* map )
+void CacheSeed::run( TileLayer* layer, const Map* map )
 {
     _visitor->setTileHandler( new CacheTileHandler( layer, map ) );
     _visitor->run( map->getProfile() );

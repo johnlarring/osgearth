@@ -1,6 +1,3 @@
-#version $GLSL_VERSION_STR
-$GLSL_DEFAULT_PRECISION_FLOAT
-
 #pragma vp_entryPoint oe_bumpmap_vertexView
 #pragma vp_location   vertex_view
 #pragma vp_order      0.5
@@ -12,7 +9,6 @@ void oe_bumpmap_vertexView(inout vec4 vertexView) { }
 
 #else
 
-uniform vec4 oe_tile_key;
 uniform float oe_bumpmap_scale;
 uniform float oe_bumpmap_baseLOD;
 
@@ -22,6 +18,8 @@ out vec3 vp_Normal;
 out vec2 oe_bumpmap_coords;
 out float oe_bumpmap_range;
 flat out mat3 oe_bumpmap_normalMatrix;
+
+vec4 oe_tile_key;
 
 
 vec2 oe_bumpmap_scaleCoords(in vec2 coords, in float targetLOD)

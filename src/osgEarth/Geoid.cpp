@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -16,9 +16,9 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
-
-#include <osgEarth/Geoid>
-#include <osgEarth/HeightFieldUtils>
+#include "Geoid"
+#include "HeightFieldUtils"
+#include "Notify"
 
 #define LC "[Geoid] "
 
@@ -26,8 +26,8 @@ using namespace osgEarth;
 
 
 Geoid::Geoid() :
-_units( Units::METERS ),
-_valid( false )
+    _units(Units::METERS),
+    _valid(false)
 {
     //nop
 }
@@ -46,13 +46,15 @@ Geoid::setHeightField( osg::HeightField* hf )
     _bounds = Bounds(
         _hf->getOrigin().x(),
         _hf->getOrigin().y(),
-        _hf->getOrigin().x() + _hf->getXInterval() * double(_hf->getNumColumns()-1),
-        _hf->getOrigin().y() + _hf->getYInterval() * double(_hf->getNumRows()-1) );
+        0.0,
+        _hf->getOrigin().x() + _hf->getXInterval() * double(_hf->getNumColumns() - 1),
+        _hf->getOrigin().y() + _hf->getYInterval() * double(_hf->getNumRows() - 1),
+        0.0);
     validate();
 }
 
 void
-Geoid::setUnits( const Units& units ) 
+Geoid::setUnits(const UnitsType& units)
 {
     _units = units;
     validate();
@@ -77,14 +79,16 @@ Geoid::validate()
 }
 
 float 
-Geoid::getHeight(double lat_deg, double lon_deg, const ElevationInterpolation& interp ) const
+Geoid::getHeight(double lat_deg, double lon_deg, const RasterInterpolation& interp ) const
 {
     float result = 0.0f;
 
-    if ( _valid && _bounds.contains(lon_deg, lat_deg) )
+    if ( _valid && contains(_bounds, lon_deg, lat_deg))
     {
-        double nlon = (lon_deg-_bounds.xMin())/_bounds.width();
-        double nlat = (lat_deg-_bounds.yMin())/_bounds.height();
+        double width = _bounds.xMax() - _bounds.xMin();
+        double height = _bounds.yMax() - _bounds.yMin();
+        double nlon = (lon_deg-_bounds.xMin())/width;
+        double nlat = (lat_deg-_bounds.yMin())/height;
         result = HeightFieldUtils::getHeightAtNormalizedLocation( _hf.get(), nlon, nlat, interp );
     }
 

@@ -1,7 +1,5 @@
-INCLUDE_DIRECTORIES(${OSG_INCLUDE_DIRS} )
-SET(TARGET_LIBRARIES_VARS OSG_LIBRARY OSGDB_LIBRARY OSGUTIL_LIBRARY OSGVIEWER_LIBRARY OPENTHREADS_LIBRARY)
-
-SET(TARGET_SRC osgearth_windows.cpp )
-
-#### end var setup  ###
-SETUP_APPLICATION(osgearth_windows)
+add_osgearth_app(
+    TARGET osgearth_windows
+    SOURCES osgearth_windows.cpp
+    USE_IMGUI
+    FOLDER Tests)

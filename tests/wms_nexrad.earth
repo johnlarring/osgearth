@@ -4,16 +4,18 @@ Weather (RADAR and IR) overlaid on the map.
 -->
 
 <map name="Current Weather">
-     
-    <xi:include href="readymap_imagery.xml"/>
+
+    <TMSImage name="ReadyMap 15m Imagery">
+        <url>https://readymap.org/readymap/tiles/1.0.0/7/</url>
+    </TMSImage>
 
     <!-- GlobalIR Imgery from http://realearth.ssec.wisc.edu/ -->	
-    <image name="GlobalIR" driver="xyz">
+    <XYZImage name="GlobalIR" async="true">
         <url>http://realearth.ssec.wisc.edu/tiles/globalir/{z}/{x}/{y}.png</url>                
         <profile>spherical-mercator</profile>
         <cache_policy usage="no_cache"/>
-		<shader>
-          <![CDATA[
+        <shader>
+            <![CDATA[
             #version 330
             #pragma vp_entryPoint adjustAlpha
             #pragma vp_location fragment_coloring
@@ -23,10 +25,11 @@ Weather (RADAR and IR) overlaid on the map.
             }
           ]]>
         </shader>
-    </image>
-    
+        <altitude>10000</altitude>
+    </XYZImage>
+
     <!-- NEXRAD 45 minute RADAR returns -->
-    <image name="nexrad45min" driver="wms">
+    <WMSImage name="nexrad45min" async="true">
         <url>http://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0r.cgi</url>
         <format>png</format>
         <layers>nexrad-n0r</layers>
@@ -34,11 +37,14 @@ Weather (RADAR and IR) overlaid on the map.
         <srs>EPSG:4326</srs>
         <transparent>true</transparent>
         <cache_policy usage="no_cache"/>
-    </image>
-    
+        <altitude>20000</altitude>
+    </WMSImage>
+
     <!-- US State Boundaries -->
-    <feature_model name="US States">
-        <features driver="ogr" url="../data/usa.shp"/>
+    <FeatureModel name="US States">
+        <OGRFeatures name="US-Data">
+            <url>../data/usa.shp</url>
+        </OGRFeatures>
         <style type="text/css">
             states {
                stroke: #7f7f7f; 
@@ -46,5 +52,5 @@ Weather (RADAR and IR) overlaid on the map.
                render-depth-offset: true;
             }                    
         </style>  
-    </feature_model>
+    </FeatureModel>
 </map>

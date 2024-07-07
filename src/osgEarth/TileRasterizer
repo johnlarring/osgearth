@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -24,93 +24,128 @@
 
 #include <osgEarth/Common>
 #include <osgEarth/GeoData>
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
 #include <osgEarth/TileKey>
+#include <osgEarth/GLUtils>
+
 #include <osg/Camera>
-#include <osg/BufferObject>
 #include <osg/Texture2D>
+#include <osgViewer/Viewer>
+#include <osg/buffered_value>
+
 #include <queue>
+#include <list>
 
 namespace osgEarth
 {
-    // placeholder - might go away -gw
-    class OSGEARTH_EXPORT GeoNode : public osg::Object
-    {
-    public:
-        META_Object(osgEarth, GeoNode);
-        GeoNode() { }
-        GeoNode(const GeoNode& rhs, const osg::CopyOp& copy) { }
-        GeoNode(osg::Node* node, const GeoExtent& extent) : _node(node), _extent(extent) { }
-
-        osg::ref_ptr<osg::Node> _node;
-        GeoExtent _extent;
-    };
+    using namespace Threading;
 
     /**
-     * Node that will render node graphs to textures, one at a time.
-     */
-    class OSGEARTH_EXPORT TileRasterizer : public osg::Camera
+    * Render node graphs to textures, one at a time.
+    */
+    class OSGEARTH_EXPORT TileRasterizer : public osg::Node
     {
     public:
-        /** Construct a new tile rasterizer camera */
-        TileRasterizer();
+        //! Construct a new tile rasterizer camera
+        TileRasterizer(unsigned width, unsigned height);
 
         /**
-         * Schedule a rasterization to an osg::Image.
-         * @param node Node to render to the image
-         * @param size of the target image (both dimensions)
-         * @param extent geospatial extent of the node to render.
-         * @return Future image - blocks on .get()
-         */
-        Threading::Future<osg::Image> push(osg::Node* node, unsigned size, const GeoExtent& extent);
+        * Schedule a rasterization to an osg::Image.
+        * @param node Node to render to the image
+        * @param size of the target image (both dimensions)
+        * @param extent geospatial extent of the node to render.
+        * @return Future image - blocks on .get() or .release()
+        */
+        Future<osg::ref_ptr<osg::Image>> render(
+            osg::Node* node, 
+            const GeoExtent& extent);
 
-        /**
-         * Schedule a rasterization to a texture.
-         * @param node    Node to render to the texture
-         * @param texture Texture to which to render the node
-         * @param extent  Geographic extent of the output texture
-         */
-        void push(osg::Node* node, osg::Texture* texture, const GeoExtent& extent);
+        //! destructor
+        virtual ~TileRasterizer();
 
     public: // osg::Node
 
-        void accept(osg::NodeVisitor&);
+        void traverse(osg::NodeVisitor& nv) override;
 
-        void traverse(osg::NodeVisitor&);
+        void releaseGLObjects(osg::State*) const override;
+
+        void resizeGLObjectBuffers(unsigned) override;
 
     private:
-        virtual ~TileRasterizer();
 
-        // internal - image with custom readback
-        struct ReadbackImage : public osg::Image
+        // Object that renders a node with an RTT camera.
+        struct Renderer
         {
-            osg::RenderInfo* _ri;
-            void readPixels(int x, int y, int width, int height, GLenum pixelFormat, GLenum type, int packing);
+            enum Phase { RENDER, QUERY, READBACK };
+            Phase _phase;
+
+            using Ptr = std::shared_ptr<Renderer>;
+
+            // Since the Renderer is already per-gc,
+            // we do not need to per-gc these objects:
+            mutable GLQuery::Ptr _query; // GL query object
+            mutable GLBuffer::Ptr _pbo; // pixel buffer object
+            mutable GLBuffer::Ptr _cbo; // copy buffer
+
+            osg::ref_ptr<osg::Texture2D> _tex;
+            osg::ref_ptr<osg::Camera> _rtt;
+            UID _uid;
+            GLsizei _dataSize;
+            osg::Image* createImage() const;
+
+            Renderer(unsigned width, unsigned height);
+            //void preDraw(osg::State&);
+            void releaseGLObjects(osg::State*) const;
+            void resizeGLObjectBuffers(unsigned);
+
+            void allocate(osg::State&);
+            GLuint query(osg::State&);
+            osg::ref_ptr<osg::Image> readback(osg::State&);
         };
 
-        // internal - scheduled rasterization job
+        // One tile-rendering job
         struct Job
         {
-            osg::ref_ptr<osg::Node> _node;
-            GeoExtent _extent;
-            osg::ref_ptr<osg::Texture> _texture;
-            osg::ref_ptr<ReadbackImage> _image;
-            osg::ref_ptr<osg::PixelBufferObject> _imagePBO;
-            Threading::Promise<osg::Image> _imagePromise;
+            using Ptr = std::shared_ptr<Job>;
+            using Result = osg::ref_ptr<osg::Image>;
+
+            UID _uid;
+            osg::ref_ptr<osg::Node> _node; // node to render
+            GeoExtent _extent; // viewport extent of the node
+            Renderer::Ptr _renderer; // Rtt camera to use to renderer
+
+            jobs::promise<Result> _promise;
+
+            void useRenderer(Renderer::Ptr);
         };
 
-        mutable Threading::Mutex _mutex;
-        typedef std::queue<Job> JobQueue;
-        mutable JobQueue _pendingJobs;  // queue for jobs waiting to render
-        mutable JobQueue _readbackJobs; // queue for jobs waiting for rtt/glReadPixels to finish
-        mutable JobQueue _finishedJobs; // queue for jobs waiting for the promise to resolve
+        // separate collection of renderers for each state-based graphics context
+        struct GLObjects : public PerStateGLObjects
+        {
+            using Ptr = std::shared_ptr<GLObjects>;
+            RoundRobin<Renderer::Ptr> _renderers;
+            MutexedQueue<Job::Ptr> _renderQ;
+        };
+        mutable osg::buffered_object<GLObjects::Ptr> _globjects;
 
-        //osg::ref_ptr<osg::Uniform> _distortionU;
+        // Jobs waiting to run
+        MutexedQueue<Job::Ptr> _jobQ;
 
-    public: // internal
+        // simple adapter to make draw callbacks take lambdas
+        struct DrawCallback : public osg::Camera::DrawCallback
+        {
+            DrawCallback(std::function<void(osg::RenderInfo&)> func) : _func(func) { }
+            std::function<void(osg::RenderInfo&)> _func;
+            void operator()(osg::RenderInfo& ri) const override { _func(ri); }
+            friend class TileRasterizer;
+        };
 
-        void preDraw(osg::RenderInfo&) const;
-        void postDraw(osg::RenderInfo&) const;
+        //void preDraw(osg::RenderInfo& ri);
+        void postDraw(osg::RenderInfo& ri);
+
+        void install(GLObjects::Ptr);
+        osg::ref_ptr<osg::StateSet> _rttStateSet;
+        unsigned _width, _height;
     };
 
 } // namespace osgEarth

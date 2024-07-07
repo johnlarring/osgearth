@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -23,8 +23,9 @@
 #include <osgEarth/Common>
 #include <osgEarth/DateTime>
 #include <vector>
+#include <map>
 
-namespace osgEarth
+namespace osgEarth { namespace Util
 {
     /**
      * Converts a filename to an absolute path.
@@ -51,6 +52,22 @@ namespace osgEarth
     extern OSGEARTH_EXPORT std::string getFullPath(
         const std::string& relativeTo, 
         const std::string& relativePath );
+
+    /**
+     * Removes any . and .. from an absolute path.  For example, if you have an absolute path
+     * of https://server.com/models/../images/texture.png the result will be https://server.com/images/texture.png
+     */
+    extern OSGEARTH_EXPORT std::string stripRelativePaths(const std::string& filename);
+
+    /**
+     * Removes any query parameters from a URL
+     */
+    extern OSGEARTH_EXPORT std::string removeQueryParams(const std::string& url);
+
+    /**
+     * Extracts all the query params from a URL into a std::map
+     */
+    extern OSGEARTH_EXPORT std::map<std::string, std::string> extractQueryParams(const std::string& url);
 
     /**
      * whether the given path ends with an Archive.
@@ -144,6 +161,6 @@ namespace osgEarth
          std::vector< std::string > filenames;    
      };
 
-}
+} }
 
 #endif

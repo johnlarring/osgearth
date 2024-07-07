@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -21,27 +21,20 @@
 */
 
 #include <osgViewer/Viewer>
-#include <osgEarth/Notify>
-#include <osgEarthUtil/EarthManipulator>
-#include <osgEarthUtil/ExampleResources>
-#include <osgEarthUtil/MouseCoordsTool>
-#include <osgEarthUtil/Controls>
+#include <osgEarth/EarthManipulator>
+#include <osgEarth/ExampleResources>
+#include <osgEarth/Utils>
 
-#include <osgEarth/Units>
-#include <osgEarth/Viewpoint>
 #include <osgEarth/Horizon>
-#include <osgEarth/TraversalData>
 #include <osgEarth/Lighting>
+#include <osgEarth/GLUtils>
+#include <osgEarth/LineDrawable>
 
-#include <osgEarthAnnotation/PlaceNode>
+#include <osgEarth/PlaceNode>
 
 #define LC "[viewer] "
 
 using namespace osgEarth;
-using namespace osgEarth::Util;
-using namespace osgEarth::Annotation;
-namespace ui = osgEarth::Util::Controls;
-
 
 #include <osg/Geometry>
 #include <osg/Depth>
@@ -52,8 +45,9 @@ namespace ui = osgEarth::Util::Controls;
 #include <osgDB/ReadFile>
 #include <osgViewer/CompositeViewer>
 #include <osgGA/TrackballManipulator>
+#include <cstdlib> // for putenv
 
-
+#if 0
 struct PlacerCallback : public MouseCoordsTool::Callback
 {
     PlaceNode* _place;
@@ -70,7 +64,7 @@ struct PlacerCallback : public MouseCoordsTool::Callback
         _eyeView->getCamera()->getViewMatrixAsLookAt(eyeWorld, c, u);
         osg::Vec3d placeWorld;
         coords.toWorld(placeWorld);
-        
+
         _place->setText( Stringify() << "Range: " << (int)(eyeWorld-placeWorld).length() << "m" );
     }
 
@@ -80,28 +74,67 @@ struct PlacerCallback : public MouseCoordsTool::Callback
         _place->setNodeMask(0);
     }
 };
+#endif
 
+struct CaptureFrustum : public osg::NodeCallback
+{
+    osg::Matrix& _proj;
+
+    CaptureFrustum(osg::Matrix& proj) : _proj(proj) { }
+
+    void operator()(osg::Node* node, osg::NodeVisitor* nv)
+    {
+        traverse(node, nv);
+
+        osgUtil::CullVisitor* cv = dynamic_cast<osgUtil::CullVisitor*>(nv);
+        double N = cv->getCalculatedNearPlane();
+        double F = cv->getCalculatedFarPlane();
+        _proj = cv->getCurrentCamera()->getProjectionMatrix();
+        cv->clampProjectionMatrix(_proj, N, F);
+    }
+};
+
+osg::Node*
+createFrustumGeometry()
+{
+    LineDrawable* geom = new LineDrawable(GL_LINES);
+    geom->setDataVariance(osg::Object::DYNAMIC);
+    geom->allocate(24);
+    geom->setColor(Color::Yellow);
+    geom->finish();
+
+    osg::MatrixTransform* mt = new osg::MatrixTransform();
+    mt->addChild(geom);
+
+    osg::Group* g0 = new osg::Group();
+    osg::StateSet* g0ss = g0->getOrCreateStateSet();
+    g0->addChild(mt);
+    g0ss->setAttributeAndModes(new osg::Depth(osg::Depth::ALWAYS, 0, 1, false), 1);
+    GLUtils::setLineStipple(g0ss, 1, 0xFF, 1);
+    g0ss->setRenderBinDetails(2, "RenderBin");
+
+    osg::Group* g1 = new osg::Group();
+    g1->addChild(mt);
+    g1->getOrCreateStateSet()->setRenderBinDetails(3, "RenderBin");
+
+    osg::Group* top = new osg::Group();
+    top->addChild(g0);
+    top->addChild(g1);
+    top->getOrCreateStateSet()->setRenderBinDetails(1, "RenderBin");
+
+    top->setUserData(geom);
+
+    GLUtils::setGlobalDefaults(top->getOrCreateStateSet());
+    top->addCullCallback(new InstallCameraUniform());
+
+    return top;
+}
 
 // Given a Camera, create a wireframe representation of its
 // view frustum. Create a default representation if camera==NULL.
-osg::Node*
-makeFrustumFromCamera( osg::Camera* camera )
+void
+updateFrustumGeometry(osg::Node* node, const osg::Matrix& modelview, const osg::Matrix& proj)
 {
-    // Projection and ModelView matrices
-    osg::Matrixd proj;
-    osg::Matrixd mv;
-    if (camera)
-    {
-        proj = camera->getProjectionMatrix();
-        mv = camera->getViewMatrix();
-    }
-    else
-    {
-        // Create some kind of reasonable default Projection matrix.
-        proj.makePerspective( 30., 1., 1., 10. );
-        // leave mv as identity
-    }
-
     // Get near and far from the Projection matrix.
     const double near = proj(3,2) / (proj(2,2)-1.0);
     const double far = proj(3,2) / (1.0+proj(2,2));
@@ -118,78 +151,53 @@ makeFrustumFromCamera( osg::Camera* camera )
     const double fTop = far * (1.0+proj(2,1)) / proj(1,1);
     const double fBottom = far * (proj(2,1)-1.0) / proj(1,1);
 
-    // Our vertex array needs only 9 vertices: The origin, and the
-    // eight corners of the near and far planes.
-    osg::Vec3Array* v = new osg::Vec3Array;
-    v->resize( 9 );
-    (*v)[0].set( 0., 0., 0. );
-    (*v)[1].set( nLeft, nBottom, -near );
-    (*v)[2].set( nRight, nBottom, -near );
-    (*v)[3].set( nRight, nTop, -near );
-    (*v)[4].set( nLeft, nTop, -near );
-    (*v)[5].set( fLeft, fBottom, -far );
-    (*v)[6].set( fRight, fBottom, -far );
-    (*v)[7].set( fRight, fTop, -far );
-    (*v)[8].set( fLeft, fTop, -far );
+    LineDrawable* geom = static_cast<LineDrawable*>(node->getUserData());
 
-    osg::Geometry* geom = new osg::Geometry;
-    geom->setUseDisplayList( false );
-    geom->setVertexArray( v );
+    osg::Vec3
+        LBN(nLeft, nBottom, -near),
+        RBN(nRight, nBottom, -near),
+        RTN(nRight, nTop, -near),
+        LTN(nLeft, nTop, -near),
+        LBF(fLeft, fBottom, -far),
+        RBF(fRight, fBottom, -far),
+        RTF(fRight, fTop, -far),
+        LTF(fLeft, fTop, -far),
+        EYE(0,0,0);
 
-    osg::Vec4Array* c = new osg::Vec4Array(osg::Array::BIND_OVERALL);
-    c->push_back( osg::Vec4( 1., 1., 0., 1. ) );
-    geom->setColorArray( c );
+    int i=0;
 
-    GLushort idxLines[8] = {
-        0, 5, 0, 6, 0, 7, 0, 8 };
-    GLushort idxLoops0[4] = {
-        1, 2, 3, 4 };
-    GLushort idxLoops1[4] = {
-        5, 6, 7, 8 };
-    geom->addPrimitiveSet( new osg::DrawElementsUShort( osg::PrimitiveSet::LINES, 8, idxLines ) );
-    geom->addPrimitiveSet( new osg::DrawElementsUShort( osg::PrimitiveSet::LINE_LOOP, 4, idxLoops0 ) );
-    geom->addPrimitiveSet( new osg::DrawElementsUShort( osg::PrimitiveSet::LINE_LOOP, 4, idxLoops1 ) );
+    // near
+    geom->setVertex(i++, LBN); geom->setVertex(i++, RBN);
+    geom->setVertex(i++, RBN); geom->setVertex(i++, RTN);
+    geom->setVertex(i++, RTN); geom->setVertex(i++, LTN);
+    geom->setVertex(i++, LTN); geom->setVertex(i++, LBN);
 
-    osg::Geode* geode = new osg::Geode;
-    geode->addDrawable( geom );
+    // far
+    geom->setVertex(i++, LBF); geom->setVertex(i++, RBF);
+    geom->setVertex(i++, RBF); geom->setVertex(i++, RTF);
+    geom->setVertex(i++, RTF); geom->setVertex(i++, LTF);
+    geom->setVertex(i++, LTF); geom->setVertex(i++, LBF);
 
-    Lighting::set(geode->getOrCreateStateSet(), osg::StateAttribute::OFF | osg::StateAttribute::PROTECTED );
-    
-#ifdef OSG_GL_FIXED_FUNCTION_AVAILABLE
-    geode->getOrCreateStateSet()->setAttributeAndModes(new osg::LineWidth(2.0f), 1);
-#endif
+    // sides
+    geom->setVertex(i++, EYE); geom->setVertex(i++, LBF);
+    geom->setVertex(i++, EYE); geom->setVertex(i++, RBF);
+    geom->setVertex(i++, EYE); geom->setVertex(i++, LTF);
+    geom->setVertex(i++, EYE); geom->setVertex(i++, RTF);
 
-
-    // Create parent MatrixTransform to transform the view volume by
-    // the inverse ModelView matrix.
-    osg::MatrixTransform* mt = new osg::MatrixTransform;
-    mt->setMatrix( osg::Matrixd::inverse( mv ) );
-    mt->addChild( geode );
-
-    osg::Group* g0 = new osg::Group();
-    g0->addChild(mt);
-    g0->getOrCreateStateSet()->setAttributeAndModes(new osg::Depth(osg::Depth::ALWAYS, 0, 1, false), 1);
-#ifdef OSG_GL_FIXED_FUNCTION_AVAILABLE
-    g0->getOrCreateStateSet()->setAttributeAndModes(new osg::LineStipple(1, 0x000F), 1);
-#endif
-    g0->getOrCreateStateSet()->setRenderBinDetails(2, "RenderBin");
-
-    osg::Group* g1 = new osg::Group();
-    g1->addChild(mt);
-    g1->getOrCreateStateSet()->setRenderBinDetails(3, "RenderBin");
-
-    osg::Group* gr = new osg::Group();
-    gr->addChild(g0);
-    gr->addChild(g1);
-    gr->getOrCreateStateSet()->setRenderBinDetails(1, "RenderBin");
-
-    return gr;
+    osg::MatrixTransform* xform = static_cast<osg::MatrixTransform*>(geom->getParent(0));
+    xform->setMatrix( osg::Matrixd::inverse(modelview) );
 }
 
+
+char debugEnv[] = "OSGEARTH_REX_DEBUG=1";
 
 int
 main( int argc, char** argv )
 {
+    osgEarth::initialize();
+
+    putenv(debugEnv);
+
     osg::ArgumentParser arguments( &argc, argv );
 
     osg::ref_ptr< osg::Group > root = new osg::Group;
@@ -199,11 +207,11 @@ main( int argc, char** argv )
 
     // Child 0: We'll replace this every frame with an updated representation
     //   of the view frustum.
-    root->addChild( makeFrustumFromCamera( NULL ) );
+    osg::Node* frustum = createFrustumGeometry();
+    root->addChild(frustum);
 
     osg::Group* scene = new osg::Group();
-    root->addChild( scene );
-
+    root->addChild(scene);
 
     // Turn on FSAA, makes the lines look better.
     osg::DisplaySettings::instance()->setNumMultiSamples( 4 );
@@ -250,19 +258,28 @@ main( int argc, char** argv )
     place->setNodeMask(0);
     viewer.getView(0)->getCamera()->addChild( place );
 
+#if 0
     MouseCoordsTool* mct = new MouseCoordsTool(mapNode);
     mct->addCallback( new PlacerCallback(place, viewer.getView(0)) );
     viewer.getView(1)->addEventHandler( mct );
+#endif
 
     mapNode->addChild(new HorizonNode());
 
-    viewer.getView(1)->getCamera()->setCullCallback( new VisitorData::Install("osgEarth.Stealth") );
+    osg::Matrix proj;
+    viewer.getView(0)->getCamera()->addCullCallback(new CaptureFrustum(proj));
+
+    viewer.getView(1)->getCamera()->setName("Spy");
+
+    viewer.getView(1)->getCamera()->setCullCallback(
+        new ObjectStorage::SetValue<bool>("osgEarth.Spy", true));
 
     while (!viewer.done())
     {
-        // Update the wireframe frustum
-        root->removeChild( 0, 1 );
-        root->insertChild( 0, makeFrustumFromCamera( viewer.getView( 0 )->getCamera() ) );
+        updateFrustumGeometry(
+            frustum,
+            viewer.getView(0)->getCamera()->getViewMatrix(),
+            proj);
 
         viewer.frame();
     }

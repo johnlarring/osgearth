@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -26,10 +26,12 @@
 #include <osgEarth/TileKey>
 #include <osgEarth/Map>
 
-#include <osgEarth/TerrainLayer>
+#include <osgEarth/TileLayer>
 
-namespace osgEarth
+
+namespace osgEarth { namespace Util
 {
+    using namespace osgEarth;
     class TileVisitor;
 
     /**
@@ -56,8 +58,15 @@ namespace osgEarth
          * that takes a --tiles argument.  This function lets you tie that process to the TileHandler
          */
         virtual std::string getProcessString() const;
+
+        //! Estimates the total number of tiles that this handler
+        //! expects to handle for the given input extents.
+        virtual unsigned getEstimatedTileCount(
+            const std::vector<GeoExtent>& extents,
+            unsigned minLevel,
+            unsigned maxLevel) const { return 0; }
     };    
 
-} // namespace osgEarth
+} } // namespace osgEarth
 
 #endif // OSGEARTH_TRAVERSAL_DATA_H

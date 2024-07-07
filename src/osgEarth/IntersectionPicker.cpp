@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -101,7 +101,7 @@ IntersectionPicker::pick( float x, float y, Hits& results ) const
         osg::Vec3d bufferLocal(local_x + buffer_x, local_y + buffer_y, 0.0);
         osg::Vec3d bufferModel = bufferLocal * modelInverse;
 
-        double buffer = osg::maximum((bufferModel - startModel).length(), 5.0);  //TODO: Setting a minimum of 4.0 may need revisited
+        double buffer = std::max((bufferModel - startModel).length(), 5.0);  //TODO: Setting a minimum of 5.0 may need revisited
 
         OE_DEBUG
             << "local_x:" << local_x << ", local_y:" << local_y

@@ -1,7 +1,6 @@
-INCLUDE_DIRECTORIES(${OSG_INCLUDE_DIRS} )
-SET(TARGET_LIBRARIES_VARS OSG_LIBRARY OSGDB_LIBRARY OSGUTIL_LIBRARY OSGVIEWER_LIBRARY OPENTHREADS_LIBRARY)
-
-SET(TARGET_SRC osgearth_pick.cpp )
-
-#### end var setup  ###
-SETUP_APPLICATION(osgearth_pick)
+add_osgearth_app(
+    TARGET osgearth_pick
+    SOURCES osgearth_pick.cpp
+    USE_IMGUI
+    FOLDER Examples )
+    

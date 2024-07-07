@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
  * Copyright 2008-2014 Pelican Mapping
  * http://osgearth.org
  *
@@ -25,7 +25,7 @@
 
 #define LC "[engine_rex] "
 
-namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
+namespace osgEarth { namespace REX
 {
     /**
      * osgEarth driver for the Rex terrain engine.
@@ -64,4 +64,4 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
 
     REGISTER_OSGPLUGIN(osgearth_engine_rex, RexTerrainEngineDriver);
 
-} } } // namespace osgEarth::Drivers::RexTerrainEngine
+} } // namespace osgEarth::REX

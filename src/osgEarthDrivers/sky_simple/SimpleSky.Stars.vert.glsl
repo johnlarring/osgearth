@@ -1,10 +1,7 @@
-#version $GLSL_VERSION_STR
-$GLSL_DEFAULT_PRECISION_FLOAT
-
 #pragma vp_entryPoint oe_Stars_VS
 #pragma vp_location vertex_clip
 
-uniform float oe_GL_PointSize;
+uniform float oe_GL_PointSize = 1.0;
 uniform vec3 atmos_v3LightDir; 
 uniform mat4 osg_ViewMatrixInverse; 
 out float oe_Stars_visibility; 

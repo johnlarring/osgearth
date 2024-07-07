@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2012 Pelican Mapping
 * http://osgearth.org
 *
@@ -23,32 +23,31 @@
 #include "SplatShaders"
 #include "NoiseTextureFactory"
 #include <osgEarth/VirtualProgram>
-#include <osgEarthFeatures/FeatureSource>
-#include <osgEarthFeatures/FeatureSourceLayer>
+#include <osgEarth/TerrainEngineNode>
 #include <osgUtil/CullVisitor>
 #include <osg/BlendFunc>
+#include <osg/Drawable>
 #include <cstdlib> // getenv
 
 #define LC "[SplatLayer] " << getName() << ": "
 
-#define COVERAGE_SAMPLER "oe_splat_coverageTex"
 #define SPLAT_SAMPLER    "oe_splatTex"
 #define NOISE_SAMPLER    "oe_splat_noiseTex"
 #define LUT_SAMPLER      "oe_splat_coverageLUT"
 
 using namespace osgEarth::Splat;
 
-namespace osgEarth { namespace Splat {
-    REGISTER_OSGEARTH_LAYER(splat_imagery, SplatLayer);
-} }
+REGISTER_OSGEARTH_LAYER(splat, SplatLayer);
+REGISTER_OSGEARTH_LAYER(splatimage, SplatLayer);
+REGISTER_OSGEARTH_LAYER(splat_imagery, SplatLayer);
 
 //........................................................................
 
 Config
-SplatLayerOptions::getConfig() const
+SplatLayer::Options::getConfig() const
 {
-    Config conf = VisibleLayerOptions::getConfig();
-    conf.set("land_cover_layer", _landCoverLayerName);
+    Config conf = VisibleLayer::Options::getConfig();
+    conf.set("land_cover_layer", landCoverLayer() );
 
     Config zones("zones");
     for (int i = 0; i < _zones.size(); ++i) {
@@ -62,9 +61,9 @@ SplatLayerOptions::getConfig() const
 }
 
 void
-SplatLayerOptions::fromConfig(const Config& conf)
+SplatLayer::Options::fromConfig(const Config& conf)
 {
-    conf.get("land_cover_layer", _landCoverLayerName);
+    conf.get("land_cover_layer", landCoverLayer() );
 
     const Config* zones = conf.child_ptr("zones");
     if (zones) {
@@ -73,24 +72,62 @@ SplatLayerOptions::fromConfig(const Config& conf)
             _zones.push_back(ZoneOptions(*i));
         }
     }
+    else { // no zones?
+        optional<SurfaceOptions> surface;
+        conf.get("surface", surface);
+        if (surface.isSet())
+        {
+            ZoneOptions zo;
+            zo.surface() = surface;
+            _zones.push_back(zo);
+        }
+    }
 }
 
 //........................................................................
 
-SplatLayer::SplatLayer() :
-VisibleLayer(&_optionsConcrete),
-_options(&_optionsConcrete)
+void
+SplatLayer::ZoneSelector::operator()(osg::Node* node, osg::NodeVisitor* nv) const
 {
-    init();
+    if (nv->getVisitorType() == nv->CULL_VISITOR)
+    {
+        osgUtil::CullVisitor* cv = dynamic_cast<osgUtil::CullVisitor*>(nv);
+
+        // If we have zones, select the current one and apply its state set.
+        if (_layer->_zones.size() > 0)
+        {
+            int zoneIndex = 0;
+            osg::Vec3d vp = cv->getViewPoint();
+
+            for(int z=_layer->_zones.size()-1; z > 0 && zoneIndex == 0; --z)
+            {
+                if ( _layer->_zones[z]->contains(vp) )
+                {
+                    zoneIndex = z;
+                }
+            }
+
+            osg::StateSet* zoneStateSet = nullptr;
+            Surface* surface = _layer->_zones[zoneIndex]->getSurface();
+            if (surface)
+            {
+                zoneStateSet = surface->getStateSet();
+            }
+
+            OE_SOFT_ASSERT_AND_RETURN(zoneStateSet != nullptr, void());
+
+            cv->pushStateSet(zoneStateSet);
+            traverse(node, nv);
+            cv->popStateSet();
+        }
+    }
+    else
+    {
+        traverse(node, nv);
+    }
 }
 
-SplatLayer::SplatLayer(const SplatLayerOptions& options) :
-VisibleLayer(&_optionsConcrete),
-_options(&_optionsConcrete),
-_optionsConcrete(options)
-{
-    init();
-}
+//........................................................................
 
 void
 SplatLayer::init()
@@ -111,12 +148,14 @@ SplatLayer::init()
         osg::ref_ptr<Zone> zone = new Zone(*i);
         _zones.push_back(zone.get());
     }
+
+    setCullCallback(new ZoneSelector(this));
 }
 
 void
 SplatLayer::setLandCoverDictionary(LandCoverDictionary* layer)
 {
-    _landCoverDict = layer;
+    _landCoverDict.setLayer(layer);
     if (layer)
         buildStateSets();
 }
@@ -124,24 +163,33 @@ SplatLayer::setLandCoverDictionary(LandCoverDictionary* layer)
 void
 SplatLayer::setLandCoverLayer(LandCoverLayer* layer)
 {
-    _landCoverLayer = layer;
+    _landCoverLayer.setLayer(layer);
     if (layer) {
         buildStateSets();
     }
 }
 
+Status
+SplatLayer::openImplementation()
+{
+    if (GLUtils::useNVGL())
+    {
+        return Status(Status::ResourceUnavailable, "Layer is not compatible with NVGL");
+    }
+
+    return VisibleLayer::openImplementation();
+}
+
 void
 SplatLayer::addedToMap(const Map* map)
 {
-    if (!_landCoverDict.valid())
-    {
-        _landCoverDictListener.listen(map, this, &SplatLayer::setLandCoverDictionary);
-    }
+    VisibleLayer::addedToMap(map);
 
-    if (!_landCoverLayer.valid() && options().landCoverLayer().isSet())
-    {
-        _landCoverListener.listen(map, options().landCoverLayer().get(), this, &SplatLayer::setLandCoverLayer);
-    }
+    if (!getLandCoverDictionary())
+        setLandCoverDictionary(map->getLayer<LandCoverDictionary>());
+
+    if (!getLandCoverLayer())
+        setLandCoverLayer(map->getLayer<LandCoverLayer>());
 
     for (Zones::iterator zone = _zones.begin(); zone != _zones.end(); ++zone)
     {
@@ -156,12 +204,15 @@ SplatLayer::addedToMap(const Map* map)
 void
 SplatLayer::removedFromMap(const Map* map)
 {
-    //NOP
+    VisibleLayer::removedFromMap(map);
 }
 
 void
-SplatLayer::setTerrainResources(TerrainResources* res)
+SplatLayer::prepareForRendering(TerrainEngine* engine)
 {
+    VisibleLayer::prepareForRendering(engine);
+
+    TerrainResources* res = engine->getResources();
     if (res)
     {
         // TODO.
@@ -198,42 +249,6 @@ SplatLayer::setTerrainResources(TerrainResources* res)
     }
 }
 
-bool
-SplatLayer::cull(const osgUtil::CullVisitor* cv,
-                 osg::State::StateSetStack& stateSetStack) const
-{
-    if (Layer::cull(cv, stateSetStack) == false)
-        return false;
-
-    // If we have zones, select the current one and apply its state set.
-    if (_zones.size() > 0)
-    {
-        int zoneIndex = 0;
-        osg::Vec3d vp = cv->getViewPoint();
-
-        for(int z=_zones.size()-1; z > 0 && zoneIndex == 0; --z)
-        {
-            if ( _zones[z]->contains(vp) )
-            {
-                zoneIndex = z;
-            }
-        }
-
-        osg::StateSet* zoneStateSet = 0L;
-        Surface* surface = _zones[zoneIndex]->getSurface();
-        if (surface)
-        {
-            zoneStateSet = surface->getStateSet();
-        }
-
-        if (zoneStateSet)
-        {
-            stateSetStack.push_back(zoneStateSet);
-        }
-    }
-    return true;
-}
-
 void
 SplatLayer::buildStateSets()
 {
@@ -248,17 +263,15 @@ SplatLayer::buildStateSets()
         return;
     }
     
-    osg::ref_ptr<LandCoverDictionary> landCoverDict;
-    if (_landCoverDict.lock(landCoverDict) == false) {
+    if (!getLandCoverDictionary()) {
         OE_DEBUG << LC << "buildStateSets deferred.. land cover dictionary not available\n";
         return;
     }
     
-    osg::ref_ptr<LandCoverLayer> landCoverLayer;
-    if (_landCoverLayer.lock(landCoverLayer) == false) {
-        OE_DEBUG << LC << "buildStateSets deferred.. land cover layer not available\n";
-        return;
-    }
+    //if (!getLandCoverLayer()) {
+    //    OE_DEBUG << LC << "buildStateSets deferred.. land cover layer not available\n";
+    //    return;
+    //}
 
     // Load all the splatting textures
     for (Zones::iterator z = _zones.begin(); z != _zones.end(); ++z)
@@ -270,7 +283,7 @@ SplatLayer::buildStateSets()
             OE_WARN << LC << "No surface defined for zone " << zone->getName() << std::endl;
             return;
         }
-        if (surface->loadTextures(landCoverDict.get(), getReadOptions()) == false)
+        if (surface->loadTextures(getLandCoverDictionary(), getReadOptions()) == false)
         {
             OE_WARN << LC << "Texture load failed for zone " << zone->getName() << "\n";
             return;
@@ -315,9 +328,6 @@ SplatLayer::buildStateSets()
         stateset->setDefine("OE_SPLAT_NOISE_SAMPLER", NOISE_SAMPLER);
     }
 
-    osg::Uniform* lcTexUniform = new osg::Uniform(COVERAGE_SAMPLER, landCoverLayer->shareImageUnit().get());
-    stateset->addUniform(lcTexUniform);
-
     stateset->addUniform(new osg::Uniform("oe_splat_scaleOffsetInt", 0));
     stateset->addUniform(new osg::Uniform("oe_splat_noiseScale", 12.0f));
     stateset->addUniform(new osg::Uniform("oe_splat_detailRange", 100000.0f));
@@ -330,19 +340,48 @@ SplatLayer::buildStateSets()
 
     stateset->setDefine("OE_USE_NORMAL_MAP");
 
-    stateset->setDefine("OE_SPLAT_COVERAGE_TEXMAT", landCoverLayer->shareTexMatUniformName().get());
-    
-    //stateset->setAttributeAndModes(
-    //    new osg::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO),
-    //    osg::StateAttribute::OVERRIDE);
-
     SplattingShaders splatting;
     VirtualProgram* vp = VirtualProgram::getOrCreate(stateset);
-    vp->setName("SplatLayer");
+    vp->setName(typeid(*this).name());
     splatting.load(vp, splatting.VertModel);
     splatting.load(vp, splatting.VertView);
     splatting.load(vp, splatting.Frag);
     splatting.load(vp, splatting.Util);
 
     OE_DEBUG << LC << "Statesets built!! Ready!\n";
+}
+
+
+void
+SplatLayer::resizeGLObjectBuffers(unsigned maxSize)
+{
+    for (Zones::const_iterator z = _zones.begin(); z != _zones.end(); ++z)
+    {
+        z->get()->resizeGLObjectBuffers(maxSize);
+    }
+
+    VisibleLayer::resizeGLObjectBuffers(maxSize);
+}
+
+void
+SplatLayer::releaseGLObjects(osg::State* state) const
+{
+    for (Zones::const_iterator z = _zones.begin(); z != _zones.end(); ++z)
+    {
+        z->get()->releaseGLObjects(state);
+    }
+
+    VisibleLayer::releaseGLObjects(state);
+}
+
+
+Config
+SplatLayer::getConfig() const
+{
+    Config c = VisibleLayer::getConfig();
+    if (_landCoverDict.isSetByUser())
+        c.set(_landCoverDict.getLayer()->getConfig());
+    if (_landCoverLayer.isSetByUser())
+        c.set(_landCoverLayer.getLayer()->getConfig());
+    return c;
 }

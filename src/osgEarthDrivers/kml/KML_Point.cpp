@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -23,6 +23,6 @@ using namespace osgEarth_kml;
 void
 KML_Point::parseCoords( xml_node<>* node, KMLContext& cx )
 {
-    _geom = new PointSet();
+    _geom = new Point();
     KML_Geometry::parseCoords( node, cx );
 }

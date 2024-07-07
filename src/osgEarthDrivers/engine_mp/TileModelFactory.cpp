@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2018 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -20,7 +20,7 @@
 * along with this program.  If not, see <http://www.gnu.org/licenses/>
 */
 #include "TileModelFactory"
-#include <osgEarth/MapFrame>
+#include "MapFrame"
 #include <osgEarth/MapInfo>
 #include <osgEarth/ImageUtils>
 #include <osgEarth/HeightFieldUtils>
@@ -84,20 +84,10 @@ namespace
             const Profile* layerProfile = _layer->getProfile();
 
             //Only try to get data from the source if it actually intersects the key extent
-            bool hasDataInExtent = _layer->mayHaveDataInExtent(_key.getExtent());
-            //bool hasDataInExtent = true;
-            //if (tileSource && layerProfile)
-            //{
-            //    GeoExtent ext = _key.getExtent();
-            //    if (!layerProfile->getSRS()->isEquivalentTo( ext.getSRS()))
-            //    {
-            //        ext = layerProfile->clampAndTransformExtent( ext );
-            //    }
-            //    hasDataInExtent = tileSource->hasDataInExtent( ext );
-            //}
+            bool hasDataInExtent = _layer->mayHaveData(_key);
             
             // fetch the image from the layer.
-            if (hasDataInExtent && _layer->isKeyInLegalRange(_key))
+            if ((hasDataInExtent && _layer->isKeyInLegalRange(_key)) || isRootKey)
             {
                 if ( useMercatorFastPath )
                 {
@@ -243,8 +233,9 @@ TileModelFactory::buildElevation(const TileKey&    key,
 {     
     const MapInfo& mapInfo = frame.getMapInfo();
 
-    const osgEarth::ElevationInterpolation& interp =
-        frame.getMapOptions().elevationInterpolation().get();
+    osg::ref_ptr<const Map> map = frame.lockMap();
+    osgEarth::RasterInterpolation interp = map.valid() ? map->getElevationInterpolation() : INTERP_BILINEAR;
+    map.release();
 
     // Request a heightfield from the map, falling back on lower resolution tiles
     // if necessary (fallback=true)
@@ -350,8 +341,9 @@ TileModelFactory::buildNormalMap(const TileKey&    key,
 {   
     const MapInfo& mapInfo = frame.getMapInfo();
 
-    const osgEarth::ElevationInterpolation& interp =
-        frame.getMapOptions().elevationInterpolation().get();
+    osg::ref_ptr<const Map> map = frame.lockMap();
+    osgEarth::RasterInterpolation interp = map.valid() ? map->getElevationInterpolation() : INTERP_BILINEAR;
+    map.release();
 
     // Request a heightfield from the map, falling back on lower resolution tiles
     // if necessary (fallback=true)

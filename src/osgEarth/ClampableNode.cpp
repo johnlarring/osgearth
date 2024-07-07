@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -18,6 +18,7 @@
  */
 
 #include <osgEarth/ClampableNode>
+#include <osgEarth/Notify>
 #include <osgEarth/ClampingTechnique>
 #include <osgEarth/MapNode>
 #include <osgEarth/NodeUtils>
@@ -80,8 +81,8 @@ ClampableNode::traverse(osg::NodeVisitor& nv)
 
                     // approximate radius under bs.center:
                     double R = 
-                        osg::absolute(p0.z()) * mapSRS->getEllipsoid()->getRadiusPolar() +
-                        (1.0 - osg::absolute(p0.z())) * mapSRS->getEllipsoid()->getRadiusEquator();
+                        osg::absolute(p0.z()) * mapSRS->getEllipsoid().getRadiusPolar() +
+                        (1.0 - osg::absolute(p0.z())) * mapSRS->getEllipsoid().getRadiusEquator();
 
                     // project to mean surface:
                     bs.center() = p0 * R;
@@ -93,8 +94,8 @@ ClampableNode::traverse(osg::NodeVisitor& nv)
                 else // projected
                 {
                     double R = osg::maximum(
-                        mapSRS->getEllipsoid()->getRadiusPolar(),
-                        mapSRS->getEllipsoid()->getRadiusEquator());
+                        mapSRS->getEllipsoid().getRadiusPolar(),
+                        mapSRS->getEllipsoid().getRadiusEquator());
                     
                     // project to mean surface:
                     bs.center().z() = 0.0;
@@ -139,19 +140,6 @@ ClampableNode::traverse(osg::NodeVisitor& nv)
         osg::Group::traverse(nv);
     }
 }
-
-
-bool ClampableNode::isDepthCamera(const osg::Camera* camera)
-{
-    if (camera->getStateSet() == NULL)
-    {
-        return false;
-    }
-
-    // Check for the existence of the OE_IS_DEPTH_CAMERA define
-    return (camera->getStateSet()->getDefineList().find("OE_IS_DEPTH_CAMERA") != camera->getStateSet()->getDefineList().end());
-}
-
 
 //...........................................................................
 

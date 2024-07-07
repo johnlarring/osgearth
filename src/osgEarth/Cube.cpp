@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -16,10 +16,12 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
-
-#include <osgEarth/Cube>
+#include "Cube"
+#include "Notify"
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
+using namespace osgEarth::Contrib;
 
 #define LC "[Cube] "
 
@@ -289,154 +291,23 @@ CubeUtils::faceToCube( double& in_out_x, double& in_out_y, int face )
 
 // --------------------------------------------------------------------------
 
-CubeFaceLocator::CubeFaceLocator(unsigned int face):
-_face(face)
+CubeSpatialReference::CubeSpatialReference(const SpatialReference::Key& key) :
+SpatialReference(key)
 {
-    //NOP
-}
-
-CubeFaceLocator::~CubeFaceLocator()
-{
-}
-
-
-bool
-CubeFaceLocator::convertLocalToModel( const osg::Vec3d& local, osg::Vec3d& world ) const
-{
-#if ((OPENSCENEGRAPH_MAJOR_VERSION <= 2) && (OPENSCENEGRAPH_MINOR_VERSION < 8))
-    // OSG 2.7 bug workaround: bug fix in Locator submitted by GW
-    const_cast<CubeFaceLocator*>(this)->_inverse.invert( _transform );
-#endif
-
-    if ( _coordinateSystemType == GEOCENTRIC )
-    {
-        //Convert the NDC coordinate into face space
-        osg::Vec3d faceCoord = local * _transform;
-
-        double lat_deg, lon_deg;
-        if ( !CubeUtils::faceCoordsToLatLon( faceCoord.x(), faceCoord.y(), _face, lat_deg, lon_deg ))
-            return false;
-
-        //OE_NOTICE << "LatLon=" << latLon <<  std::endl;
-
-        // convert to geocentric:
-        _ellipsoidModel->convertLatLongHeightToXYZ(
-            osg::DegreesToRadians( lat_deg ),
-            osg::DegreesToRadians( lon_deg ),
-            local.z(),
-            world.x(), world.y(), world.z() );
-
-        return true;
-    }    
-    return true;
-}
-
-
-bool
-CubeFaceLocator::convertModelToLocal(const osg::Vec3d& world, osg::Vec3d& local) const
-{
-#if ((OPENSCENEGRAPH_MAJOR_VERSION <= 2) && (OPENSCENEGRAPH_MINOR_VERSION < 8))
-    // OSG 2.7 bug workaround: bug fix in Locator submitted by GW
-    const_cast<CubeFaceLocator*>(this)->_inverse.invert( _transform );
-#endif
-
-    switch(_coordinateSystemType)
-    {
-    case(GEOCENTRIC):
-        {         
-            double longitude, latitude, height;
-
-            _ellipsoidModel->convertXYZToLatLongHeight(world.x(), world.y(), world.z(), latitude, longitude, height );
-
-            int face=-1;
-            double x, y;
-
-            double lat_deg = osg::RadiansToDegrees(latitude);
-            double lon_deg = osg::RadiansToDegrees(longitude);
-
-            bool success = CubeUtils::latLonToFaceCoords( lat_deg, lon_deg, x, y, face, _face );
-
-            if (!success)
-            {
-                OE_WARN << LC << "Couldn't convert to face coords " << std::endl;
-                return false;
-            }
-            if (face != _face)
-            {
-                OE_WARN << LC
-                    << "Face should be " << _face << " but is " << face
-                    << ", lat = " << lat_deg
-                    << ", lon = " << lon_deg
-                    << std::endl;
-            }
-
-            local = osg::Vec3d( x, y, height ) * _inverse;
-            return true;
-        }
-
-
-    case(GEOGRAPHIC):
-    case(PROJECTED):
-        // Neither of these is supported for this locator..
-        {        
-            local = world * _inverse;
-            return true;      
-        }
-    }    
-
-    return false;
-}
-
-// --------------------------------------------------------------------------
-
-CubeSpatialReference::CubeSpatialReference( void* handle ) :
-SpatialReference(handle, std::string("OSGEARTH"))
-{
-    _key.horiz      = "unified-cube";
-    _key.horizLower = "unified-cube";
-    _name           = "Unified Cube";
-}
-
-CubeSpatialReference::~CubeSpatialReference()
-{
-}
-
-void
-CubeSpatialReference::_init()
-{
-    SpatialReference::_init();
-
     _is_user_defined = true;
     _is_cube         = true;
-    _is_contiguous   = false;
-    _is_geographic   = false;
-    _key.horiz       = "unified-cube";
-    _key.horizLower  = "unified-cube";
-    _name            = "Unified Cube";
+    _domain = PROJECTED;
+    _name = "Unified Cube";
 
     // Custom units. The big number there roughly converts [0..1] to meters
     // on a spheroid with WGS84-ish radius. Not perfect but close enough for
     // the purposes of this class
-    _units = Units("Cube face", "cube", Units::TYPE_LINEAR, 42949672.96/4.0);
+    _units = UnitsType("Cube face", "cube", Units::Domain::DISTANCE, 42949672.96/4.0);
 }
 
-GeoLocator*
-CubeSpatialReference::createLocator(double xmin, double ymin, double xmax, double ymax) const
+CubeSpatialReference::~CubeSpatialReference()
 {
-    int face;
-    CubeUtils::cubeToFace( xmin, ymin, xmax, ymax, face );
-
-    GeoLocator* result = new CubeFaceLocator( face );
-
-    osg::Matrixd transform;
-    transform.set(
-        xmax-xmin, 0.0,       0.0, 0.0,
-        0.0,       ymax-ymin, 0.0, 0.0,
-        0.0,       0.0,       1.0, 0.0,
-        xmin,      ymin,      0.0, 1.0); 
-    result->setTransform( transform );
-
-    return result;
+    //nop
 }
 
 const SpatialReference*
@@ -523,28 +394,28 @@ CubeSpatialReference::transformExtentToMBR(const SpatialReference* to_srs,
                                            double&                 in_out_ymax ) const
 {
     // input bounds:
-    Bounds inBounds(in_out_xmin, in_out_ymin, in_out_xmax, in_out_ymax);
+    Bounds inBounds(in_out_xmin, in_out_ymin, 0, in_out_xmax, in_out_ymax, 0);
 
     Bounds outBounds;
 
     // for each CUBE face, find the intersection of the input bounds and that face.
     for (int face = 0; face < 6; ++face)
     {
-        Bounds faceBounds( (double)(face), 0.0, (double)(face+1), 1.0);
+        Bounds faceBounds((double)(face), 0.0, 0.0, (double)(face + 1), 1.0, 0.0);
 
-        Bounds intersection = faceBounds.intersectionWith(inBounds);
+        Bounds isect = intersectionOf(faceBounds, inBounds);
 
         // if they intersect (with a non-zero area; abutting doesn't count in this case)
         // transform the intersection and include in the result.
-        if (intersection.isValid() && intersection.area2d() > 0.0)
+        if (isect.valid() && area2d(isect) > 0.0)
         {
             double
-                xmin = intersection.xMin(), ymin = intersection.yMin(),
-                xmax = intersection.xMax(), ymax = intersection.yMax();
+                xmin = isect.xMin(), ymin = isect.yMin(),
+                xmax = isect.xMax(), ymax = isect.yMax();
 
             if (transformInFaceExtentToMBR(to_srs, face, xmin, ymin, xmax, ymax))
             {
-                outBounds.expandBy(Bounds(xmin, ymin, xmax, ymax));
+                outBounds.expandBy(Bounds(xmin, ymin, 0.0, xmax, ymax, 0.0));
             }
         }
     }

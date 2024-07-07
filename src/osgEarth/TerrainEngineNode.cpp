@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -19,6 +19,7 @@
 #include <osgEarth/TerrainEngineNode>
 #include <osgEarth/Registry>
 #include <osgEarth/MapModelChange>
+#include <osgDB/ReadFile>
 
 #define LC "[TerrainEngineNode] "
 
@@ -34,13 +35,6 @@ namespace osgEarth
 
         osg::observer_ptr<TerrainEngineNode> _node;
 
-        void onMapInfoEstablished( const MapInfo& mapInfo )
-        {
-            osg::ref_ptr<TerrainEngineNode> safeNode;
-            if (_node.lock(safeNode))
-                safeNode->onMapInfoEstablished( mapInfo );
-        }
-
         void onMapModelChanged( const MapModelChange& change )
         {
             osg::ref_ptr<TerrainEngineNode> safeNode;
@@ -51,15 +45,7 @@ namespace osgEarth
 }
 
 
-//------------------------------------------------------------------------
-
-
-TerrainEngineNode::ImageLayerController::ImageLayerController(TerrainEngineNode* engine) :
-_engine( engine )
-{    
-    //nop
-}
-
+//...................................................................
 
 void
 TerrainEngineNode::addEffect(TerrainEffect* effect)
@@ -93,74 +79,39 @@ TerrainEngineNode::getResources() const
     return _textureResourceTracker.get();
 }
 
-void
-TerrainEngineNode::ImageLayerController::onColorFiltersChanged( ImageLayer* layer )
-{
-    _engine->updateTextureCombining();
-}
-
 
 //------------------------------------------------------------------------
 
 
 TerrainEngineNode::TerrainEngineNode() :
-_verticalScale           ( 1.0f ),
-_initStage               ( INIT_NONE ),
-_dirtyCount              ( 0 ),
-_requireElevationTextures( false ),
-_requireNormalTextures   ( false ),
-_requireParentTextures   ( false ),
-_requireElevationBorder  ( false ),
-_requireFullDataAtFirstLOD( false ),
-_redrawRequired          ( true ),
-_updateScheduled( false )
+    _dirtyCount(0),
+    _updateScheduled(false)
 {
     // register for event traversals so we can properly reset the dirtyCount
     ADJUST_EVENT_TRAV_COUNT(this, 1);
 
-    // register for update traversals so we can process terrain callbacks
-    //ADJUST_UPDATE_TRAV_COUNT(this, 1);
+    // Install an object to manage texture image unit usage:
+    _textureResourceTracker = new TerrainResources();
+    std::set<int> offLimits = osgEarth::Registry::instance()->getOffLimitsTextureImageUnits();
+    for (std::set<int>::const_iterator i = offLimits.begin(); i != offLimits.end(); ++i)
+        _textureResourceTracker->setTextureImageUnitOffLimits(*i);
 }
 
 TerrainEngineNode::~TerrainEngineNode()
 {
     OE_DEBUG << LC << "~TerrainEngineNode\n";
+}
 
-    //Remove any callbacks added to the image layers
-    if (_map.valid())
+namespace
+{
+    struct RequestRedraw
     {
-        ImageLayerVector imageLayers;
-        _map->getLayers(imageLayers);
-
-        for( ImageLayerVector::const_iterator i = imageLayers.begin(); i != imageLayers.end(); ++i )
-        {
-            i->get()->removeCallback( _imageLayerController.get() );
+        void operator()(osg::View* view) {
+            osgGA::GUIActionAdapter* aa = dynamic_cast<osgGA::GUIActionAdapter*>(view);
+            if (aa) aa->requestRedraw();
         }
-    }
+    };
 }
-
-
-void
-TerrainEngineNode::requireNormalTextures()
-{
-    _requireNormalTextures = true;
-    dirtyTerrain();
-}
-
-void
-TerrainEngineNode::requireElevationTextures()
-{
-    _requireElevationTextures = true;
-    dirtyTerrain();
-}
-
-void
-TerrainEngineNode::requireParentTextures()
-{
-    _requireParentTextures = true;
-    dirtyTerrain();
-}
-
 
 void
 TerrainEngineNode::requestRedraw()
@@ -174,9 +125,11 @@ TerrainEngineNode::requestRedraw()
 }
 
 void
-TerrainEngineNode::dirtyTerrain()
+TerrainEngineNode::shutdown()
 {
-    requestRedraw();
+    // DO NOT destroy the tile model factory; it may still be in use
+    // by a loading thread via a ref_ptr lock (see LoadTileData).
+    //_tileModelFactory = nullptr;
 }
 
 void
@@ -184,66 +137,68 @@ TerrainEngineNode::setMap(const Map* map, const TerrainOptions& options)
 {
     if (!map) return;
 
+    if (!map->getProfile())
+    {
+        OE_WARN << "Illegal: Map profile is not set" << std::endl;
+        return;
+    }
+
     _map = map;
-    
+
+    // store a const copy of the terrain options
+    _optionsConcrete = options;
+
     // Create a terrain utility interface. This interface can be used
     // to query the in-memory terrain graph, subscribe to tile events, etc.
-    _terrainInterface = new Terrain( this, map->getProfile(), options );
-
-    // Set up the CSN values. We support this because some manipulators look for it,
-    // but osgEarth itself doesn't use it.
-    _map->getProfile()->getSRS()->populateCoordinateSystemNode( this );
-    
-    // OSG's CSN likes a NULL ellipsoid to represent projected mode.
-    if ( !_map->isGeocentric() )
-        this->setEllipsoidModel( NULL );
-    
-    // Install an object to manage texture image unit usage:
-    _textureResourceTracker = new TerrainResources();
-    std::set<int> offLimits = osgEarth::Registry::instance()->getOffLimitsTextureImageUnits();
-    for(std::set<int>::const_iterator i = offLimits.begin(); i != offLimits.end(); ++i)
-        _textureResourceTracker->setTextureImageUnitOffLimits( *i );
+    _terrainInterface = new Terrain( this, map->getProfile() );
 
     // Register a callback so we can process further map model changes
     _map->addMapCallback( new TerrainEngineNodeCallbackProxy(this) );
 
     // Force a render bin if specified in the options
-    if ( options.binNumber().isSet() )
+    if ( options.renderBinNumber().isSet() )
     {
         osg::StateSet* set = getOrCreateStateSet();
-        set->setRenderBinDetails( options.binNumber().get(), "RenderBin" );
+        set->setRenderBinDetails(options.renderBinNumber().get(), "RenderBin" );
     }
-   
+
     // This is the object that creates the data model for each terrain tile.
     _tileModelFactory = new TerrainTileModelFactory(options);
 
-    // Manually trigger the map callbacks the first time:
+    // Cross-compatibility stuff supporting CSN.
+    // osgEarth doesn't use this but other systems might.
     if (_map->getProfile())
-        onMapInfoEstablished(MapInfo(_map.get()));
-
-    // Create a layer controller. This object affects the uniforms
-    // that control layer appearance properties
-    _imageLayerController = new ImageLayerController(this);
-
-    // register the layer Controller it with all pre-existing image layers:
-    ImageLayerVector imageLayers;
-    _map->getLayers(imageLayers);
-    for (ImageLayerVector::const_iterator i = imageLayers.begin(); i != imageLayers.end(); ++i)
     {
-        i->get()->addCallback(_imageLayerController.get());
+        // set up the CSN values
+        _map->getProfile()->getSRS()->populateCoordinateSystemNode( this );
+
+        // OSG's CSN likes a NULL ellipsoid to represent projected mode.
+        if (_map->getProfile()->getSRS()->isProjected())
+        {
+            this->setEllipsoidModel(nullptr);
+        }
     }
 
-    _initStage = INIT_POSTINIT_COMPLETE;
+    // Hide the terrain engine if it's marked as not visible.  This is mostly used when
+    // rendering whole earth layers like Google Earth tiles and you don't want to see the globe.
+    if (!*options.visible())
+    {
+        setNodeMask(0);
+    }
+
+    // invoke the callback for a subclass to do its thing
+    onSetMap();
 }
 
 osg::BoundingSphere
 TerrainEngineNode::computeBound() const
 {
-    if ( getEllipsoidModel() )
+    if ( getMap() && getMap()->getSRS())
     {
+        const Ellipsoid& e = getMap()->getSRS()->getEllipsoid();
         double maxRad = std::max(
-            getEllipsoidModel()->getRadiusEquator(),
-            getEllipsoidModel()->getRadiusPolar());
+            e.getRadiusEquator(),
+            e.getRadiusPolar());
 
         return osg::BoundingSphere( osg::Vec3(0,0,0), maxRad+25000 );
     }
@@ -254,30 +209,8 @@ TerrainEngineNode::computeBound() const
 }
 
 void
-TerrainEngineNode::onMapInfoEstablished( const MapInfo& mapInfo )
-{
-    // set up the CSN values   
-    mapInfo.getProfile()->getSRS()->populateCoordinateSystemNode( this );
-    
-    // OSG's CSN likes a NULL ellipsoid to represent projected mode.
-    if ( !mapInfo.isGeocentric() )
-        this->setEllipsoidModel( NULL );
-}
-
-void
 TerrainEngineNode::onMapModelChanged( const MapModelChange& change )
 {
-    if (change.getAction() == MapModelChange::ADD_LAYER &&
-        change.getImageLayer() != 0L)
-    {
-        change.getImageLayer()->addCallback( _imageLayerController.get() );
-    }
-    else if (change.getAction() == MapModelChange::REMOVE_LAYER &&
-        change.getImageLayer() != 0L)
-    {
-        change.getImageLayer()->removeCallback( _imageLayerController.get() );
-    }
-
     if (change.getElevationLayer() != 0L)
     {
         getTerrain()->notifyMapElevationChanged();
@@ -288,24 +221,25 @@ TerrainEngineNode::onMapModelChanged( const MapModelChange& change )
 }
 
 TerrainTileModel*
-TerrainEngineNode::createTileModel(const Map*                   map,
-                                   const TileKey&               key,
-                                   const CreateTileModelFilter& filter,
-                                   ProgressCallback*            progress)
+TerrainEngineNode::createTileModel(const Map* map,
+                                   const TileKey& key,
+                                   const CreateTileManifest& manifest,
+                                   ProgressCallback* progress)
 {
-    TerrainEngineRequirements* requirements = this;
+    if ( !_tileModelFactory.valid() )
+        return nullptr;
 
     // Ask the factory to create a new tile model:
     osg::ref_ptr<TerrainTileModel> model = _tileModelFactory->createTileModel(
-        map, 
-        key, 
-        filter,
-        requirements,         
+        map,
+        key,
+        manifest,
+        getRequirements(),
         progress);
 
     if ( model.valid() )
     {
-        // Fire all registered tile model callbacks, so user code can 
+        // Fire all registered tile model callbacks, so user code can
         // add to or otherwise customize the model before it's returned
         Threading::ScopedReadLock sharedLock(_createTileModelCallbacksMutex);
         for(CreateTileModelCallbacks::iterator i = _createTileModelCallbacks.begin();
@@ -318,14 +252,14 @@ TerrainEngineNode::createTileModel(const Map*                   map,
     return model.release();
 }
 
-void 
+void
 TerrainEngineNode::addCreateTileModelCallback(CreateTileModelCallback* callback)
 {
     Threading::ScopedWriteLock exclusiveLock(_createTileModelCallbacksMutex);
     _createTileModelCallbacks.push_back(callback);
 }
 
-void 
+void
 TerrainEngineNode::removeCreateTileModelCallback(CreateTileModelCallback* callback)
 {
     Threading::ScopedWriteLock exclusiveLock(_createTileModelCallbacksMutex);
@@ -339,15 +273,44 @@ TerrainEngineNode::removeCreateTileModelCallback(CreateTileModelCallback* callba
     }
 }
 
-
-namespace
+void
+TerrainEngineNode::addModifyTileBoundingBoxCallback(ModifyTileBoundingBoxCallback* callback)
 {
-    Threading::Mutex s_opqlock;
+    Threading::ScopedWriteLock exclusiveLock(_createTileModelCallbacksMutex);
+    _modifyTileBoundingBoxCallbacks.push_back(callback);
+}
+
+void
+TerrainEngineNode::removeModifyTileBoundingBoxCallback(ModifyTileBoundingBoxCallback* callback)
+{
+    Threading::ScopedWriteLock exclusiveLock(_createTileModelCallbacksMutex);
+    for (ModifyTileBoundingBoxCallbacks::iterator i = _modifyTileBoundingBoxCallbacks.begin();
+        i != _modifyTileBoundingBoxCallbacks.end();
+        ++i)
+    {
+        if (i->get() == callback)
+        {
+            _modifyTileBoundingBoxCallbacks.erase(i);
+            break;
+        }
+    }
+}
+
+void
+TerrainEngineNode::fireModifyTileBoundingBoxCallbacks(const TileKey& key, osg::BoundingBox& box)
+{
+    Threading::ScopedReadLock sharedLock(_createTileModelCallbacksMutex);
+    for (ModifyTileBoundingBoxCallbacks::iterator i = _modifyTileBoundingBoxCallbacks.begin();
+        i != _modifyTileBoundingBoxCallbacks.end();
+        ++i)
+    {
+        i->get()->modifyBoundingBox(key, box);
+    }
 }
 
 void
 TerrainEngineNode::traverse( osg::NodeVisitor& nv )
-{    
+{
     if ( nv.getVisitorType() == nv.EVENT_VISITOR )
     {
         _dirtyCount = 0;
@@ -371,37 +334,8 @@ TerrainEngineNode::traverse( osg::NodeVisitor& nv )
     osg::CoordinateSystemNode::traverse( nv );
 }
 
-//todo: remove?
-void
-TerrainEngineNode::notifyOfTerrainTileNodeCreation(const TileKey& key, osg::Node* node)
-{
-    Threading::ScopedMutexLock lock(_tileNodeCallbacksMutex);
-    for(unsigned i=0; i<_tileNodeCallbacks.size(); ++i)
-    {
-        _tileNodeCallbacks[i]->operator()(key, node);
-    }
-}
-
-ComputeRangeCallback*
-TerrainEngineNode::getComputeRangeCallback() const
-{
-    return _computeRangeCallback.get();
-}
-
-void
-TerrainEngineNode::setComputeRangeCallback(ComputeRangeCallback* computeRangeCallback)
-{
-    _computeRangeCallback = computeRangeCallback;
-}
-
-
-//------------------------------------------------------------------------
-
-#undef LC
-#define LC "[TerrainEngineNodeFactory] "
-
 TerrainEngineNode*
-TerrainEngineNodeFactory::create(const TerrainOptions& options )
+TerrainEngineNode::create(const TerrainOptions& options )
 {
     osg::ref_ptr<TerrainEngineNode> node;
 
@@ -411,14 +345,17 @@ TerrainEngineNodeFactory::create(const TerrainOptions& options )
     if ( driver.empty() )
         driver = Registry::instance()->getDefaultTerrainEngineDriverName();
 
-    std::string driverExt = std::string( ".osgearth_engine_" ) + driver;
-    osg::ref_ptr<osg::Object> object = osgDB::readRefObjectFile( driverExt );
-    node = dynamic_cast<TerrainEngineNode*>( object.release() );
-    if ( !node )
+    std::string driverExt = std::string("osgearth_engine_") + driver;
+    auto rw = osgDB::Registry::instance()->getReaderWriterForExtension(driverExt);
+    if (rw)
     {
-        OE_WARN << "WARNING: Failed to load terrain engine driver for \"" << driver << "\"" << std::endl;
+        osg::ref_ptr<osg::Object> object = rw->readObject("." + driverExt).getObject();
+        node = dynamic_cast<TerrainEngineNode*>(object.release());
+        if (!node)
+        {
+            OE_WARN << "WARNING: Failed to load terrain engine driver for \"" << driver << "\"" << std::endl;
+        }
     }
 
     return node.release();
 }
-

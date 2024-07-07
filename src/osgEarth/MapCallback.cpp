@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -41,21 +41,21 @@ MapCallback::onMapModelChanged( const MapModelChange& change )
         onLayerMoved(change.getLayer(), change.getFirstIndex(), change.getSecondIndex());
         break;
 
-    case MapModelChange::ENABLE_LAYER:
-        onLayerEnabled(change.getLayer());
+    case MapModelChange::OPEN_LAYER:
+        onLayerOpened(change.getLayer());
         break;
 
-    case MapModelChange::DISABLE_LAYER:
-        onLayerDisabled(change.getLayer());
+    case MapModelChange::CLOSE_LAYER:
+        onLayerClosed(change.getLayer());
         break;
 
     case MapModelChange::BEGIN_BATCH_UPDATE:
-	onBeginUpdate();
-	break;
+	    onBeginUpdate();
+	    break;
 
     case MapModelChange::END_BATCH_UPDATE:
-	onEndUpdate();
-	break;
+	    onEndUpdate();
+	    break;
 
     default: 
         break;

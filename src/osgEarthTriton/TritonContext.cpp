@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -28,7 +28,7 @@
 using namespace osgEarth::Triton;
 
 
-TritonContext::TritonContext(const TritonOptions& options) :
+TritonContext::TritonContext(const TritonLayer::Options& options) :
 _options              ( options ),
 _initAttempted        ( false ),
 _initFailed           ( false ),
@@ -71,13 +71,13 @@ TritonContext::passHeightMapToTriton() const
 int
 TritonContext::getHeightMapSize() const
 {
-    return osg::clampBetween(_options.heightMapSize().get(), 64, 2048);
+    return osg::clampBetween(_options.heightMapSize().get(), 64u, 2048u);
 }
 
 const std::string&
 TritonContext::getMaskLayerName() const
 {
-    return _options.maskLayer().get();
+    return _options.maskLayer().externalLayerName().get();
 }
 
 void
@@ -86,7 +86,7 @@ TritonContext::initialize(osg::RenderInfo& renderInfo)
     if ( !_initAttempted && !_initFailed )
     {
         // lock/double-check:
-        Threading::ScopedMutexLock excl(_initMutex);
+        std::lock_guard<std::mutex> excl(_initMutex);
         if ( !_initAttempted && !_initFailed )
         {
             _initAttempted = true;
@@ -115,10 +115,10 @@ TritonContext::initialize(osg::RenderInfo& renderInfo)
             // Set the ellipsoid to match the one in our map's SRS.
             if ( _srs->isGeographic() )
             {
-                const osg::EllipsoidModel* ellipsoid = _srs->getEllipsoid();
+                const Ellipsoid& ellipsoid = _srs->getEllipsoid();
                 
-                std::string eqRadius = Stringify() << ellipsoid->getRadiusEquator();
-                std::string poRadius = Stringify() << ellipsoid->getRadiusPolar();
+                std::string eqRadius = Stringify() << ellipsoid.getRadiusEquator();
+                std::string poRadius = Stringify() << ellipsoid.getRadiusPolar();
 
                 _environment->SetConfigOption( "equatorial-earth-radius-meters", eqRadius.c_str() );
                 _environment->SetConfigOption( "polar-earth-radius-meters",      poRadius.c_str() );
@@ -151,7 +151,8 @@ TritonContext::initialize(osg::RenderInfo& renderInfo)
 
                 _ocean = ::Triton::Ocean::Create(
                     _environment, 
-                    ::Triton::JONSWAP );
+                    ::Triton::JONSWAP,
+                    true );                 // enableHeightTests - activated GetHeight for intersections
             }
 
             if ( _ocean )
@@ -175,14 +176,15 @@ TritonContext::initialize(osg::RenderInfo& renderInfo)
     }
 }
 
-void
-TritonContext::update(double simTime)
+bool
+TritonContext::intersect(const osg::Vec3d& start, const osg::Vec3d& dir, float& out_height, osg::Vec3f& out_normal) const
 {
-    if ( _ocean )
-    {
-        // fmod requires b/c CUDA is limited to single-precision values
-        _ocean->UpdateSimulation( fmod(simTime, 86400.0) );
-    }
+    ::Triton::Vector3 p(start.ptr());
+    ::Triton::Vector3 d(dir.ptr());
+    ::Triton::Vector3 normal;
+    bool ok = _ocean->GetHeight(p, d, out_height, normal);
+    out_normal.set(normal.x, normal.y, normal.z);
+    return ok;
 }
 
 void

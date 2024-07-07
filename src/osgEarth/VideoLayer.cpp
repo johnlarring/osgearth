@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -22,78 +22,49 @@
 
 using namespace osgEarth;
 
-REGISTER_OSGEARTH_LAYER(video, VideoLayer);
-
-VideoLayerOptions::VideoLayerOptions() :
-ImageLayerOptions()
-{
-    setDefaults();
-    fromConfig(_conf);
-}
-
-VideoLayerOptions::VideoLayerOptions(const ConfigOptions& options) :
-ImageLayerOptions( options )
-{
-    setDefaults();
-    fromConfig( _conf );
-}
-
-VideoLayerOptions::VideoLayerOptions(const std::string& name) :
-ImageLayerOptions( name )
-{
-    setDefaults();
-    fromConfig( _conf );
-}
-
-void
-VideoLayerOptions::setDefaults()
-{
-}
+//.......................................................................
 
 Config
-VideoLayerOptions::getConfig() const
+VideoLayer::Options::getConfig() const
 {
-    Config conf = ImageLayerOptions::getConfig();
+    Config conf = ImageLayer::Options::getConfig();
     conf.set("url", _url);
     return conf;
 }
 
 void
-VideoLayerOptions::fromConfig( const Config& conf )
+VideoLayer::Options::fromConfig( const Config& conf )
 {
     conf.get("url", _url );
 }
 
+//-------------------------------------------------------------
+
+REGISTER_OSGEARTH_LAYER(video, VideoLayer);
+
+OE_LAYER_PROPERTY_IMPL(VideoLayer, URI, URL, url);
+
 void
-VideoLayerOptions::mergeConfig( const Config& conf )
+VideoLayer::init()
 {
-    ImageLayerOptions::mergeConfig( conf );
-    fromConfig( conf );
+    ImageLayer::init();
+    
+    // Configure the layer to use createTexture() to return data
+    setUseCreateTexture();
 }
 
-
-VideoLayer::VideoLayer()
+Status
+VideoLayer::openImplementation()
 {
-    init();
-}
-
-VideoLayer::VideoLayer( const VideoLayerOptions& options ):
-ImageLayer(&_optionsConcrete),
-_options(&_optionsConcrete),
-_optionsConcrete(options)
-{    
-    init();    
-}
-
-const Status&
-VideoLayer::open()
-{
-    if ( !_openCalled )
+    if (!isOpen())
     {
+        Status parent = ImageLayer::openImplementation();
+        if (parent.isError())
+            return parent;
 
         if (!options().url().isSet())
         {
-            return setStatus(Status::Error(Status::ConfigurationError, "Missing required url"));
+            return Status(Status::ConfigurationError, "Missing required url");
         }
 
         osg::ref_ptr< osg::Image > image = options().url()->readImage().getImage();
@@ -118,35 +89,24 @@ VideoLayer::open()
         {
             std::stringstream buf;
             buf << "Failed to load " << options().url()->full();
-            return setStatus(Status::Error(Status::ServiceUnavailable, buf.str()));
+            return Status(Status::ServiceUnavailable, buf.str());
         }
 
-        setProfile(osgEarth::Registry::instance()->getGlobalGeodeticProfile());
-
-        if (getStatus().isOK())
-        {
-            return ImageLayer::open();
-        }
+        setProfile(Profile::create(Profile::GLOBAL_GEODETIC));
     }
 
     return getStatus();
 }
 
-osg::Texture* VideoLayer::createTexture(const TileKey& key, ProgressCallback* progress, osg::Matrixf& textureMatrix)
-{    
-    if (key.getLOD() > 0) return 0;
-
-    bool flip = _texture->getImage()->getOrigin()==osg::Image::TOP_LEFT;
-    osg::Matrixf scale = osg::Matrixf::scale(0.5, flip? -1.0 : 1.0, 1.0);         
-
-    if (key.getTileX() == 0)
+TextureWindow
+VideoLayer::createTexture(const TileKey& key, ProgressCallback* progress) const
+{   
+    osg::Matrix textureMatrix;
+    bool flip = _texture->getImage()->getOrigin() == osg::Image::TOP_LEFT;    
+    key.getExtent().createScaleBias(key.getProfile()->getExtent(), textureMatrix);
+    if (flip)
     {
-        textureMatrix = scale;
-    }
-    else if (key.getTileX() == 1)
-    {
-        textureMatrix =  scale * osg::Matrixf::translate(0.5, 0.0, 0.0);
-    }
-
-    return _texture.get();
+        textureMatrix *= osg::Matrixf::scale(1.0, flip ? -1.0 : 1.0, 1.0);
+    }  
+    return TextureWindow(_texture.get(), textureMatrix);
 }

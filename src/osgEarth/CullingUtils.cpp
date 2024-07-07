@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -16,14 +16,18 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
-#include <osgEarth/CullingUtils>
-#include <osgEarth/LineFunctor>
-#include <osgEarth/VirtualProgram>
-#include <osgEarth/Utils>
+#include "CullingUtils"
+#include "LineFunctor"
+#include "VirtualProgram"
+#include "Utils"
+#include "Math"
+#include "Notify"
+
 #include <osg/TemplatePrimitiveFunctor>
 #include <osgDB/ObjectWrapper>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 namespace
 {
@@ -457,8 +461,7 @@ ClusterCullingFactory::create(const osg::Vec3& controlPoint,
 osg::NodeCallback*
 ClusterCullingFactory::create(const GeoExtent& extent)
 {
-    GeoPoint centerPoint;
-    extent.getCentroid( centerPoint );
+    GeoPoint centerPoint = extent.getCentroid();
 
     // select the farthest corner:
     GeoPoint edgePoint;
@@ -886,8 +889,6 @@ ProxyCullVisitor::apply(osg::Drawable& drawable)
 namespace
 {
     const char* horizon_vs =
-        "#version " GLSL_VERSION_STR "\n"
-        GLSL_DEFAULT_PRECISION_FLOAT "\n"
         "uniform mat4 osg_ViewMatrix; \n"
         "out float oe_horizon_alpha; \n"
         "void oe_horizon_vertex(inout vec4 VertexVIEW) \n"
@@ -911,8 +912,6 @@ namespace
         "} \n";
 
     const char* horizon_fs =
-        "#version " GLSL_VERSION_STR "\n"
-        GLSL_DEFAULT_PRECISION_FLOAT "\n"
         "in float oe_horizon_alpha; \n"
         "void oe_horizon_fragment(inout vec4 color) \n"
         "{ \n"
@@ -928,8 +927,8 @@ HorizonCullingProgram::install(osg::StateSet* stateset)
     {
         VirtualProgram* vp = VirtualProgram::getOrCreate(stateset);
         vp->setName("HorizonCullingProgram");
-        vp->setFunction( "oe_horizon_vertex",   horizon_vs, ShaderComp::LOCATION_VERTEX_VIEW );
-        vp->setFunction( "oe_horizon_fragment", horizon_fs, ShaderComp::LOCATION_FRAGMENT_COLORING );
+        vp->setFunction( "oe_horizon_vertex",   horizon_vs, VirtualProgram::LOCATION_VERTEX_VIEW );
+        vp->setFunction( "oe_horizon_fragment", horizon_fs, VirtualProgram::LOCATION_FRAGMENT_COLORING );
     }
 }
 
@@ -976,13 +975,14 @@ LODScaleGroup::traverse(osg::NodeVisitor& nv)
 
 //------------------------------------------------------------------
 
-ClipToGeocentricHorizon::ClipToGeocentricHorizon(const osgEarth::SpatialReference* srs,
-                                                 osg::ClipPlane*                   clipPlane)
+ClipToGeocentricHorizon::ClipToGeocentricHorizon(
+    const osgEarth::SpatialReference* srs,
+    osg::ClipPlane* clipPlane)
 {
     if ( srs )
     {
         _horizon = new Horizon();
-        _horizon->setEllipsoid( *srs->getEllipsoid() );
+        _horizon->setEllipsoid(srs->getEllipsoid());
     }
 
     _clipPlane = clipPlane;
@@ -994,8 +994,8 @@ ClipToGeocentricHorizon::operator()(osg::Node* node, osg::NodeVisitor* nv)
     osg::ref_ptr<osg::ClipPlane> clipPlane;
     if ( _clipPlane.lock(clipPlane) )
     {
-        osg::ref_ptr<Horizon> horizon = Horizon::get(*nv);
-        if ( !horizon.valid() ) 
+        osg::ref_ptr<Horizon> horizon;
+        if (!ObjectStorage::get(nv, horizon))
         {
             horizon = new Horizon(*_horizon.get());
             horizon->setEye( nv->getViewPoint() );
@@ -1018,8 +1018,8 @@ AltitudeCullCallback::operator()(osg::Node* node, osg::NodeVisitor* nv)
 
     if (_maxAltitude.isSet())
     {
-        Horizon* horizon = Horizon::get(*nv);
-        if (horizon)
+        osg::ref_ptr<Horizon> horizon;
+        if (ObjectStorage::get(nv, horizon))
         {
             visible = nv->getDistanceToViewPoint(osg::Vec3(0, 0, 0), true) <
                 _maxAltitude.get() + horizon->getRadius();
@@ -1029,7 +1029,7 @@ AltitudeCullCallback::operator()(osg::Node* node, osg::NodeVisitor* nv)
             if (_srs->isGeographic())
             {
                 visible = nv->getDistanceToViewPoint(osg::Vec3(0, 0, 0), true) <
-                    _maxAltitude.get() + _srs->getEllipsoid()->getRadiusEquator();
+                    _maxAltitude.get() + _srs->getEllipsoid().getRadiusEquator();
             }
             else
             {
@@ -1099,6 +1099,7 @@ CullDebugger::dumpRenderBin(osgUtil::RenderBin* bin) const
     Config conf("RenderBin");
     if ( !bin->getName().empty() )
         conf.set("Name", bin->getName());
+    conf.set("SortMode", Stringify()<<bin->getSortMode());
     if (bin->getStateSet())
         conf.set("StateSet", dumpStateSet(bin->getStateSet()));
 
@@ -1137,19 +1138,34 @@ CullDebugger::dumpRenderBin(osgUtil::RenderBin* bin) const
 //...................................................................
 
 void
-InstallViewportSizeUniform::operator()(osg::Node* node, osg::NodeVisitor* nv)
+InstallCameraUniform::operator()(osg::Node* node, osg::NodeVisitor* nv)
 {
     osgUtil::CullVisitor* cv = dynamic_cast<osgUtil::CullVisitor*>(nv);
     const osg::Camera* camera = cv->getCurrentCamera();
     
     osg::ref_ptr<osg::StateSet> ss;
 
-    if (camera && camera->getViewport())
+    if (camera)
     {
+        float width = 1, height = 1;
+
+        if (camera->getViewport())
+        {
+            width = camera->getViewport()->width();
+            height = camera->getViewport()->height();
+        }
+        else
+        {
+            double L, R, B, T, N, F;
+            if (ProjectionMatrix::getOrtho(camera->getProjectionMatrix(), L, R, B, T, N, F))
+            {
+                width = R - L;
+                height = T - B;
+            }
+        }
+    
         ss = new osg::StateSet();
-        ss->addUniform(new osg::Uniform("oe_ViewportSize", osg::Vec2f(
-            camera->getViewport()->width(),
-            camera->getViewport()->height())));
+        ss->addUniform(new osg::Uniform("oe_Camera", osg::Vec3f(width, height, camera->getLODScale())));
         cv->pushStateSet(ss.get());
     }
 
@@ -1159,13 +1175,13 @@ InstallViewportSizeUniform::operator()(osg::Node* node, osg::NodeVisitor* nv)
         cv->popStateSet();
 }
 
-namespace osgEarth { namespace Serializers { namespace InstallViewportSizeUniform
+namespace osgEarth { namespace Serializers { namespace InstallCameraUniform
 {
     REGISTER_OBJECT_WRAPPER(
-        InstallViewportSizeUniform,
-        new osgEarth::InstallViewportSizeUniform,
-        osgEarth::InstallViewportSizeUniform,
-        "osg::Object osg::NodeCallback osgEarth::InstallViewportSizeUniform")
+        InstallCameraUniform,
+        new osgEarth::InstallCameraUniform,
+        osgEarth::InstallCameraUniform,
+        "osg::Object osg::NodeCallback osgEarth::InstallCameraUniform")
     {
         // no properties
     }

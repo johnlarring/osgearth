@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -20,9 +20,17 @@
 #include <osgEarth/Registry>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
+
+#if 0
+TransientUserDataStore::TransientUserDataStore() :
+    _mutex(OE_MUTEX_NAME)
+{
+    //nop
+}
 
 bool
-TransientUserDataStore::isObserverInvalid(const Table::entry_t& p)
+TransientUserDataStore::isObserverInvalid(const Table::value_type& p)
 {
     return p.second._owner.valid() == false;
 }
@@ -41,7 +49,7 @@ TransientUserDataStore::store(osg::Referenced* owner, const std::string& key, os
     _mutex.lock();
 
     // clear out orphaned data:
-    _table.erase( std::remove_if(_table.begin(), _table.end(), isObserverInvalid), _table.end() );
+    //_table.erase( std::remove_if(_table.begin(), _table.end(), isObserverInvalid), _table.end() );
 
     // insert new data:
     DataPair& p = _table[owner];
@@ -159,3 +167,4 @@ VisitorData::isSet(osg::NodeVisitor& nv, const std::string& key)
     return Registry::instance()->dataStore().exists( &nv, key );
 }
 
+#endif

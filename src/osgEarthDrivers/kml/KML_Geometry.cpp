@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -97,22 +97,28 @@ KML_Geometry::parseCoords( xml_node<>* node, KMLContext& cx )
     xml_node<>* coords = node->first_node("coordinates", 0, false);
     if ( coords )
     {
-        StringVector tuples;
-        StringTokenizer( coords->value(), tuples, " \n", "", false, true );
-        for( StringVector::const_iterator s=tuples.begin(); s != tuples.end(); ++s )
+        xml_node<>* coord = coords->first_node();
+        while (coord)
         {
-            StringVector parts;
-            StringTokenizer( *s, parts, ",", "", false, true );
-            if ( parts.size() >= 2 )
+            StringVector tuples;
+            StringTokenizer(coord->value(), tuples, " \n", "", false, true);
+            for (StringVector::const_iterator s = tuples.begin(); s != tuples.end(); ++s)
             {
-                osg::Vec3d point;
-                point.x() = as<double>( parts[0], 0.0 );
-                point.y() = as<double>( parts[1], 0.0 );
-                if ( parts.size() >= 3 ) {
-                    point.z() = as<double>( parts[2], 0.0 );
+                StringVector parts;
+                StringTokenizer(*s, parts, ",", "", false, true);
+                if (parts.size() >= 2)
+                {
+                    osg::Vec3d point;
+                    point.x() = as<double>(parts[0], 0.0);
+                    point.y() = as<double>(parts[1], 0.0);
+                    if (parts.size() >= 3) {
+                        point.z() = as<double>(parts[2], 0.0);
+                    }
+                    _geom->push_back(point);
                 }
-                _geom->push_back(point);
             }
+            coords->remove_first_node();
+            coord = coords->first_node();
         }
     }
 }
@@ -177,7 +183,7 @@ KML_Geometry::parseStyle( xml_node<>* node, KMLContext& cx, Style& style )
     }
 
     // clamp to ground mode:
-    if ( am == "clampToGround" )
+    if ( am == "clampToGround" || am == "clampToSeaFloor" )
     {
         if ( _extrude )
         {
@@ -189,9 +195,9 @@ KML_Geometry::parseStyle( xml_node<>* node, KMLContext& cx, Style& style )
         }
         else if ( isLine)
         {
-            alt->technique() = alt->TECHNIQUE_DRAPE; // or could be GPU.
+            alt->technique() = alt->TECHNIQUE_SCENE;
         }
-        else // line or point
+        else // point
         {
             alt->technique() = alt->TECHNIQUE_SCENE;
         }
@@ -203,7 +209,7 @@ KML_Geometry::parseStyle( xml_node<>* node, KMLContext& cx, Style& style )
     // "relativeToGround" means the coordinates' Z values are relative to the Z of the
     // terrain at that point. NOTE: GE flattens rooftops in this mode when extrude=1,
     // which seems wrong..
-    else if ( am == "relativeToGround" )
+    else if ( am == "relativeToGround" || am == "relativeToSeaFloor" )
     {
         alt->clamping() = alt->CLAMP_RELATIVE_TO_TERRAIN;
 
@@ -236,6 +242,11 @@ KML_Geometry::parseStyle( xml_node<>* node, KMLContext& cx, Style& style )
     else if ( am == "absolute" )
     {
         alt->clamping() = AltitudeSymbol::CLAMP_ABSOLUTE;
+    }
+
+    else if (!am.empty())
+    {
+        OE_WARN << LC << "KML altitudeMode \"" << am << "\" is invalid" << std::endl;
     }
 
     if ( _extrude )

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -23,7 +23,7 @@
 #define OSGEARTH_OVERLAY_DECORATOR
 
 #include <osgEarth/Common>
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
 #include <osgEarth/TerrainEngineNode>
 #include <osg/Camera>
 #include <osg/CoordinateSystemNode>
@@ -35,6 +35,10 @@
 namespace osgEarth
 {
     class TerrainEngineNode;
+}
+
+namespace osgEarth { namespace Util
+{
     class OverlayDecorator;
     class OverlayTechnique;
 
@@ -149,11 +153,11 @@ namespace osgEarth
         unsigned                      _totalOverlayChildren;
 
         osg::ref_ptr<const SpatialReference>    _srs;
-        osg::ref_ptr<const osg::EllipsoidModel> _ellipsoid;
+        Ellipsoid _ellipsoid;
         osg::observer_ptr<TerrainEngineNode>    _engine;
 
         // Mapping of each RTT camera params vector to a Camera (per view data)
-        typedef std::map<osg::Camera*, PerViewData> PerViewDataMap;
+        using PerViewDataMap = std::unordered_map<osg::Camera*, PerViewData>;
 
         PerViewDataMap _perViewData;
         mutable Threading::ReadWriteMutex _perViewDataMutex;
@@ -199,6 +203,8 @@ namespace osgEarth
     public:
         virtual bool supported() { return _supported; }
 
+        virtual bool constrainOrthoZ() const { return false; }
+
         virtual bool hasData(
             OverlayDecorator::TechRTTParams& params) const { return true; }
 
@@ -225,6 +231,6 @@ namespace osgEarth
         virtual void releaseGLObjects(osg::State* state) const { }
     };
 
-} // namespace osgEarth
+} } // namespace osgEarth
 
 #endif //OSGEARTH_OVERLAY_DECORATOR

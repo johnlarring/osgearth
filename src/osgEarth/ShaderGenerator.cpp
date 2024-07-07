@@ -1,7 +1,7 @@
 
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -26,6 +26,7 @@
 #include <osgEarth/Shaders>
 #include <osgEarth/GLUtils>
 #include <osgEarth/Lighting>
+#include "ShaderLoader"
 
 #include <osg/PagedLOD>
 #include <osg/ProxyNode>
@@ -57,6 +58,7 @@
 #define PROMOTE_EQUIVALENT_DRAWABLE_VP_TO_GEODE 1
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 //------------------------------------------------------------------------
 
@@ -68,7 +70,7 @@ using namespace osgEarth;
 #   define LOWP           "lowp "
 #   define HIGHP          "highp "
 #else
-#   define GLSL_PRECISION ""
+#   define GLSL_PRECISION
 #   define MEDIUMP        ""
 #   define LOWP           ""
 #   define HIGHP          ""
@@ -313,26 +315,10 @@ namespace
 //...........................................................................
 
 ShaderGenerator::GenBuffers::GenBuffers() :
-_version( GLSL_VERSION ),
 _stateSet(0L)
 {
     //nop
 }
-
-bool
-ShaderGenerator::GenBuffers::requireVersion(unsigned glslVersion, unsigned glesVersion)
-{
-    unsigned versionToCheck = Registry::capabilities().isGLES() ? glesVersion : glslVersion;
-
-    if ( !Registry::capabilities().supportsGLSL(versionToCheck) )
-        return false;
-
-    if ( versionToCheck > _version )
-        _version = versionToCheck;
-
-    return true;
-}
-
 
 //...........................................................................
 
@@ -427,6 +413,19 @@ ShaderGenerator::run(osg::Node*         graph,
             vp->setName( vpName );
         }
     }
+}
+
+osg::ref_ptr<osg::StateSet>
+ShaderGenerator::run(osg::StateSet* ss)
+{
+    if (!ss)
+        return NULL;
+
+    _state->pushStateSet(ss);
+    osg::ref_ptr<osg::StateSet> replacement;
+    processGeometry(ss, replacement);
+    _state->popStateSet();
+    return replacement;
 }
 
 void
@@ -640,15 +639,15 @@ ShaderGenerator::apply(osg::PagedLOD& node)
 
     for( unsigned i=0; i<node.getNumFileNames(); ++i )
     {
-        static Threading::Mutex s_mutex;
-        s_mutex.lock();
+        static std::mutex s_mutex;
+        std::lock_guard<std::mutex> lock(s_mutex);
+
         const std::string& filename = node.getFileName( i );
         if (!filename.empty() &&
             osgDB::getLowerCaseFileExtension(filename).compare(SHADERGEN_PL_EXTENSION) != 0 )
         {
             node.setFileName( i, Stringify() << filename << "." << SHADERGEN_PL_EXTENSION );
         }
-        s_mutex.unlock();
     }
 
     apply( static_cast<osg::LOD&>(node) );
@@ -740,16 +739,6 @@ ShaderGenerator::processText(const osg::StateSet* ss, osg::ref_ptr<osg::StateSet
     // Capture the active current state:
     osg::ref_ptr<osg::StateSet> current = static_cast<StateEx*>(_state.get())->capture();
 
-
-    // We ignore an existing program if the version is < 3.6.0 which is when the new osg text shaders with sdf were introduced.
-#if OSG_VERSION_LESS_THAN(3,6,0)
-    // check for a real osg::Program. If it exists, bail out so that OSG
-    // can use the program already in the graph
-    osg::StateAttribute* program = current->getAttribute(osg::StateAttribute::PROGRAM);
-    if ( dynamic_cast<osg::Program*>(program) != 0L )
-        return false;
-#endif
-
     // New state set. We never modify existing statesets.
     replacement = ss ? osg::clone(ss, osg::CopyOp::SHALLOW_COPY) : new osg::StateSet();
 
@@ -762,37 +751,11 @@ ShaderGenerator::processText(const osg::StateSet* ss, osg::ref_ptr<osg::StateSet
         vp->setName( _name );
     }
 
-#if OSG_VERSION_LESS_THAN(3,6,0)
-    std::string vertSrc =
-        "#version " GLSL_VERSION_STR "\n" GLSL_PRECISION "\n"
-        "out " MEDIUMP "vec4 " TEX_COORD_TEXT ";\n"
-        "void " VERTEX_MODEL_FUNCTION "(inout vec4 unused)\n"
-        "{ \n"
-        INDENT TEX_COORD_TEXT " = gl_MultiTexCoord0;\n"
-        "} \n";
-
-    std::string fragSrc =
-        "#version " GLSL_VERSION_STR "\n" GLSL_PRECISION "\n"
-        "uniform sampler2D " SAMPLER_TEXT ";\n"
-        "in " MEDIUMP "vec4 " TEX_COORD_TEXT ";\n"
-        "void " FRAGMENT_FUNCTION "(inout vec4 color)\n"
-        "{ \n"
-        INDENT MEDIUMP "vec4 texel = texture(" SAMPLER_TEXT ", " TEX_COORD_TEXT ".xy);\n"
-        INDENT "color.a *= texel.a; \n"
-        "}\n";
-
-    vp->setFunction( VERTEX_MODEL_FUNCTION, vertSrc, ShaderComp::LOCATION_VERTEX_MODEL, 0.5f );
-    vp->setFunction( FRAGMENT_FUNCTION, fragSrc, ShaderComp::LOCATION_FRAGMENT_COLORING, 0.5f );
-    replacement->getOrCreateUniform( SAMPLER_TEXT, osg::Uniform::SAMPLER_2D )->set( 0 );
-#else
     Shaders shaders;
-    shaders.load(vp.get(), shaders.TextVertex);
-    shaders.load(vp.get(), shaders.TextFragment);
+    shaders.load(vp.get(), shaders.Text);
     #if defined(OSG_GL3_AVAILABLE) && !defined(OSG_GL2_AVAILABLE) && !defined(OSG_GL1_AVAILABLE)
         replacement->setDefine("OSGTEXT_GLYPH_ALPHA_FORMAT_IS_RED");
     #endif
-
-#endif
 
     return replacement.valid();
 }
@@ -838,7 +801,6 @@ ShaderGenerator::processGeometry(const osg::StateSet*         original,
     }
 
     // Check whether the lighting state has changed and install a mode uniform.
-    // TODO: fix this
     if ( original && original->getMode(GL_LIGHTING) != osg::StateAttribute::INHERIT )
     {
         needNewStateSet = true;
@@ -868,18 +830,27 @@ ShaderGenerator::processGeometry(const osg::StateSet*         original,
 
             osg::Texture* tex = dynamic_cast<osg::Texture*>( current->getTextureAttribute(unit, osg::StateAttribute::TEXTURE) );
 
+            osg::TexGen* texgen = dynamic_cast<osg::TexGen*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXGEN));
+            osg::TexEnv* texenv = dynamic_cast<osg::TexEnv*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXENV));
+            osg::TexMat* texmat = dynamic_cast<osg::TexMat*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXMAT));
+            osg::PointSprite* sprite = dynamic_cast<osg::PointSprite*>(current->getTextureAttribute(unit, osg::StateAttribute::POINTSPRITE));
+
             if (accept(tex) && !ImageUtils::isFloatingPointInternalFormat(tex->getInternalFormat()))
             {
-                osg::TexGen* texgen = dynamic_cast<osg::TexGen*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXGEN));
-                osg::TexEnv* texenv = dynamic_cast<osg::TexEnv*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXENV));
-                osg::TexMat* texmat = dynamic_cast<osg::TexMat*>(current->getTextureAttribute(unit, osg::StateAttribute::TEXMAT));
-                osg::PointSprite* sprite = dynamic_cast<osg::PointSprite*>(current->getTextureAttribute(unit, osg::StateAttribute::POINTSPRITE));
-
                 if ( apply(tex, texgen, texenv, texmat, sprite, unit, buf) == true )
                 {
                     needNewStateSet = true;
                 }
             }
+
+#ifndef OSG_GL_FIXED_FUNCTION_AVAILABLE
+            if (texgen)
+                newStateSet->removeTextureAttribute(unit, texgen);
+            if (texenv)
+                newStateSet->removeTextureAttribute(unit, texenv);
+            if (texmat)
+                newStateSet->removeTextureAttribute(unit, texmat);
+#endif
         }
     }
 
@@ -892,21 +863,18 @@ ShaderGenerator::processGeometry(const osg::StateSet*         original,
 
     if ( needNewStateSet )
     {
-        std::string version = GLSL_VERSION_STR;
-
         std::string modelHeadSource = buf._modelHead.str();
         std::string modelBodySource = buf._modelBody.str();
 
         if (!modelHeadSource.empty() && !modelBodySource.empty())
         {
             std::string modelSource = Stringify()
-                << "#version " << version << "\n" GLSL_PRECISION "\n"
                 << modelHeadSource
                 << "void " VERTEX_MODEL_FUNCTION "(inout vec4 vertex_model)\n{\n"
                 << modelBodySource
                 << "}\n";
 
-            vp->setFunction(VERTEX_MODEL_FUNCTION, modelSource, ShaderComp::LOCATION_VERTEX_MODEL, 0.5f);
+            vp->setFunction(VERTEX_MODEL_FUNCTION, modelSource, VirtualProgram::LOCATION_VERTEX_MODEL, 0.5f);
         }
 
         std::string viewHeadSource;
@@ -918,13 +886,12 @@ ShaderGenerator::processGeometry(const osg::StateSet*         original,
         if ( !viewHeadSource.empty() && !viewBodySource.empty() )
         {
             std::string viewSource = Stringify()
-                << "#version " << version << "\n" GLSL_PRECISION "\n"
                 << viewHeadSource
                 << "void " VERTEX_VIEW_FUNCTION "(inout vec4 vertex_view)\n{\n"
                 << viewBodySource
                 << "}\n";
 
-            vp->setFunction(VERTEX_VIEW_FUNCTION, viewSource, ShaderComp::LOCATION_VERTEX_VIEW, 0.5f);
+            vp->setFunction(VERTEX_VIEW_FUNCTION, viewSource, VirtualProgram::LOCATION_VERTEX_VIEW, 0.5f);
         }
 
 
@@ -937,13 +904,12 @@ ShaderGenerator::processGeometry(const osg::StateSet*         original,
         if ( !fragHeadSource.empty() && !fragBodySource.empty() )
         {
             std::string fragSource = Stringify()
-                << "#version " << version << "\n" GLSL_PRECISION "\n"
                 << fragHeadSource
                 << "void " FRAGMENT_FUNCTION "(inout vec4 color)\n{\n"
                 << fragBodySource
                 << "}\n";
 
-            vp->setFunction(FRAGMENT_FUNCTION, fragSource, ShaderComp::LOCATION_FRAGMENT_COLORING, 0.5f);
+            vp->setFunction(FRAGMENT_FUNCTION, fragSource, VirtualProgram::LOCATION_FRAGMENT_COLORING, 0.5f);
         }
     }
 
@@ -1218,8 +1184,6 @@ ShaderGenerator::apply(osg::Texture3D* tex, int unit, GenBuffers& buf)
 bool
 ShaderGenerator::apply(osg::TextureRectangle* tex, int unit, GenBuffers& buf)
 {
-    buf._viewHead << "#extension GL_ARB_texture_rectangle : enable\n";
-
     buf._fragHead << "uniform sampler2DRect " SAMPLER << unit << ";\n";
     buf._fragBody << INDENT "texel = texture(" SAMPLER << unit << ", " TEX_COORD << unit << ".xy);\n";
     buf._stateSet->getOrCreateUniform( Stringify() << SAMPLER << unit, osg::Uniform::SAMPLER_2D )->set( unit );
@@ -1230,11 +1194,9 @@ ShaderGenerator::apply(osg::TextureRectangle* tex, int unit, GenBuffers& buf)
 bool
 ShaderGenerator::apply(osg::Texture2DArray* tex, int unit, GenBuffers& buf)
 {
-    buf._fragHead <<  "#extension GL_EXT_texture_array : enable \n";
-
     buf._fragHead << "uniform sampler2DArray " SAMPLER << unit << ";\n";
-    buf._fragBody << INDENT "texel = texture(" SAMPLER << unit << ", " TEX_COORD << unit << ".xyz);\n";
     buf._stateSet->getOrCreateUniform( Stringify() << SAMPLER << unit, osg::Uniform::SAMPLER_2D_ARRAY )->set( unit );
+    buf._fragBody << INDENT "texel = texture(" SAMPLER << unit << ", " TEX_COORD << unit << ".xyz);\n";
 
     return true;
 }
@@ -1253,8 +1215,6 @@ ShaderGenerator::apply(osg::TextureCubeMap* tex, int unit, GenBuffers& buf)
 bool
 ShaderGenerator::apply(osg::PointSprite* tex, int unit, GenBuffers& buf)
 {
-    if ( !buf.requireVersion(120) ) return false;
-
     std::string sampler = Stringify() << SAMPLER << unit;
     buf._fragHead << "uniform sampler2D " << sampler << ";\n";
     buf._fragBody << INDENT << "texel = texture(" << sampler << ", gl_PointCoord);\n";

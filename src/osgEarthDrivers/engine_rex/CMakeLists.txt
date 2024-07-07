@@ -1,18 +1,20 @@
 
-SET(TARGET_COMMON_LIBRARIES ${TARGET_COMMON_LIBRARIES} osgEarthSymbology osgEarthUtil)
-
 set(TARGET_GLSL
     RexEngine.vert.glsl
     RexEngine.elevation.glsl
-    RexEngine.vert.view.glsl
-    RexEngine.tcs.glsl
-    RexEngine.tes.glsl
     RexEngine.gs.glsl
-    RexEngine.frag.glsl
-    RexEngine.NormalMap.vert.glsl
-    RexEngine.NormalMap.frag.glsl
-    RexEngine.Morphing.vert.glsl
-    RexEngine.SDK.vert.glsl)
+    RexEngine.ImageLayer.glsl
+    RexEngine.NormalMap.glsl
+    RexEngine.Morphing.glsl
+    RexEngine.Tessellation.glsl
+    RexEngine.SDK.glsl
+    
+    RexEngine.vert.GL4.glsl
+    RexEngine.ImageLayer.GL4.glsl
+    RexEngine.NormalMap.GL4.glsl
+    RexEngine.Tessellation.GL4.glsl
+    RexEngine.SDK.GL4.glsl
+    RexEngine.GL4.glsl)
 
 set(TARGET_IN
     Shaders.cpp.in)
@@ -24,7 +26,10 @@ configure_shaders(
     ${SHADERS_CPP}
     ${TARGET_GLSL} )
 
+# SET(TARGET_LIBRARIES_VARS OSG_LIBRARY OSGDB_LIBRARY OSGUTIL_LIBRARY OSGTEXT_LIBRARY OPENTHREADS_LIBRARY OPENGL_gl_LIBRARY) 
+
 SET(TARGET_SRC
+    CreateTileImplementation.cpp
     DrawState.cpp
     DrawTileCommand.cpp
     GeometryPool.cpp
@@ -32,7 +37,6 @@ SET(TARGET_SRC
     RexTerrainEngineDriver.cpp
     LayerDrawable.cpp
     LoadTileData.cpp
-    MaskGenerator.cpp
 	SelectionInfo.cpp
     SurfaceNode.cpp
     TerrainCuller.cpp
@@ -48,15 +52,14 @@ SET(TARGET_SRC
 
 SET(TARGET_H
     Common
+    CreateTileImplementation
     DrawState
     DrawTileCommand
     GeometryPool
     Shaders
     RexTerrainEngineNode
-    RexTerrainEngineOptions
     LayerDrawable
     LoadTileData
-    MaskGenerator
     RenderBindings
     SurfaceNode
     TerrainCuller
@@ -71,9 +74,10 @@ SET(TARGET_H
 	SelectionInfo
 )
 
-setup_plugin(osgearth_engine_rex)
-
-# to install public driver includes:
-SET(LIB_NAME engine_rex)
-SET(LIB_PUBLIC_HEADERS ${TARGET_H})
-INCLUDE(ModuleInstallOsgEarthDriverIncludes OPTIONAL)
+add_osgearth_plugin(
+    TARGET osgdb_osgearth_engine_rex
+    HEADERS ${TARGET_H}
+    SOURCES ${TARGET_SRC}
+    SHADERS ${TARGET_GLSL}
+    TEMPLATES ${TARGET_IN}
+    LIBRARIES OpenGL::GL)

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
 /* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -20,6 +20,7 @@
 #include <osgEarth/Profile>
 #include <osgEarth/Registry>
 #include <osgEarth/TileKey>
+#include <osgEarth/Math>
 
 using namespace osgEarth;
 
@@ -61,22 +62,28 @@ ProfileOptions::fromConfig( const Config& conf )
     if ( !conf.value().empty() )
         _namedProfile = conf.value();
 
-    conf.get( "srs", _srsInitString );
+    if (conf.hasChild("profile"))
+        fromConfig(conf.child("profile"));
 
+    conf.get( "srs", _srsInitString );
     conf.get( "vdatum", _vsrsInitString );
     conf.get( "vsrs", _vsrsInitString ); // back compat
 
     if ( conf.hasValue( "xmin" ) && conf.hasValue( "ymin" ) && conf.hasValue( "xmax" ) && conf.hasValue( "ymax" ) )
     {
         _bounds = Bounds(
-            conf.value<double>( "xmin", 0 ),
-            conf.value<double>( "ymin", 0 ),
-            conf.value<double>( "xmax", 0 ),
-            conf.value<double>( "ymax", 0 ) );
+            conf.value<double>("xmin", 0),
+            conf.value<double>("ymin", 0),
+            0.0,
+            conf.value<double>("xmax", 0),
+            conf.value<double>("ymax", 0),
+            0.0);
     }
 
     conf.get( "num_tiles_wide_at_lod_0", _numTilesWideAtLod0 );
+    conf.get( "tx", _numTilesWideAtLod0 );
     conf.get( "num_tiles_high_at_lod_0", _numTilesHighAtLod0 );
+    conf.get( "ty", _numTilesHighAtLod0 );
 }
 
 Config
@@ -85,7 +92,7 @@ ProfileOptions::getConfig() const
     Config conf( "profile" );
     if ( _namedProfile.isSet() )
     {
-        conf.value() = _namedProfile.value();
+        conf.setValue(_namedProfile.value());
     }
     else
     {
@@ -114,6 +121,10 @@ ProfileOptions::defined() const
 
 /***********************************************************************/
 
+std::string Profile::GLOBAL_GEODETIC("global-geodetic");
+std::string Profile::GLOBAL_MERCATOR("global-mercator");
+std::string Profile::SPHERICAL_MERCATOR("spherical-mercator");
+std::string Profile::PLATE_CARREE("plate-carree");
 
 // FACTORY METHODS:
 
@@ -139,22 +150,65 @@ Profile::create(const std::string& srsInitString,
 }
 
 const Profile*
+Profile::create(
+    const std::string& wellKnownName,
+    const SpatialReference* srs,
+    double xmin, double ymin, double xmax, double ymax,
+    unsigned int numTilesWideAtLod0,
+    unsigned int numTilesHighAtLod0)
+{
+    const Profile* result = create(
+        srs, xmin, ymin, xmax, ymax, numTilesWideAtLod0, numTilesHighAtLod0);
+    const_cast<Profile*>(result)->_wellKnownName = wellKnownName;
+    return result;
+}
+
+const Profile*
 Profile::create(const SpatialReference* srs,
                 double xmin, double ymin, double xmax, double ymax,
                 unsigned int numTilesWideAtLod0,
                 unsigned int numTilesHighAtLod0)
 {
-    if (srs != NULL)
+    OE_SOFT_ASSERT_AND_RETURN(srs!=nullptr, nullptr);
+
+    return new Profile(
+        srs,
+        xmin, ymin, xmax, ymax,
+        numTilesWideAtLod0,
+        numTilesHighAtLod0 );
+}
+
+const Profile*
+Profile::create(const SpatialReference* srs)
+{
+    OE_SOFT_ASSERT_AND_RETURN(srs != nullptr, nullptr);
+
+    Bounds bounds;
+    if (srs->getBounds(bounds))
     {
+        unsigned x = 1, y = 1;
+        float ar = (float)width(bounds) / (float)height(bounds);
+        if (ar > 1.5f)
+        {
+            x = (unsigned)::ceil(ar);
+        }
+        else if (ar < 0.5f)
+        {
+            y = (unsigned)::ceil(1.0f / ar);
+        }
+
         return new Profile(
             srs,
-            xmin, ymin, xmax, ymax,
-            numTilesWideAtLod0,
-            numTilesHighAtLod0 );
+            bounds.xMin(), bounds.yMin(), bounds.xMax(), bounds.yMax(),
+            x, y);
     }
-
-    OE_WARN << LC << "Failed to create profile; null SRS" << std::endl;
-    return 0L;
+    else
+    {
+        return create(
+            srs->getHorizInitString(),
+            srs->getVertInitString(),
+            0, 0);
+    }
 }
 
 const Profile*
@@ -164,18 +218,14 @@ Profile::create(const SpatialReference* srs,
                 unsigned int numTilesWideAtLod0,
                 unsigned int numTilesHighAtLod0)
 {
-    if ( srs )
-    {
-        return new Profile(
-            srs,
-            xmin, ymin, xmax, ymax,
-            geoxmin, geoymin, geoxmax, geoymax,
-            numTilesWideAtLod0,
-            numTilesHighAtLod0 );
-    }
-    
-    OE_WARN << LC << "Failed to create profile; null SRS" << std::endl;
-    return 0L;
+    OE_SOFT_ASSERT_AND_RETURN(srs!=nullptr, nullptr);
+
+    return new Profile(
+        srs,
+        xmin, ymin, xmax, ymax,
+        geoxmin, geoymin, geoxmax, geoymax,
+        numTilesWideAtLod0,
+        numTilesHighAtLod0);
 }
 
 const Profile*
@@ -184,14 +234,9 @@ Profile::create(const std::string& srsInitString,
                 unsigned int numTilesWideAtLod0,
                 unsigned int numTilesHighAtLod0)
 {
-    if ( vsrsInitString.empty() && numTilesWideAtLod0 == 0 && numTilesHighAtLod0 == 0 )
-    {
-        const Profile* named = osgEarth::Registry::instance()->getNamedProfile( srsInitString );
-        if ( named )
-            return const_cast<Profile*>( named );
-    }
-
-    osg::ref_ptr<const SpatialReference> srs = SpatialReference::create( srsInitString, vsrsInitString );
+    osg::ref_ptr<const SpatialReference> srs = SpatialReference::create( 
+        srsInitString, 
+        vsrsInitString );
 
     if ( srs.valid() && srs->isGeographic() )
     {
@@ -212,11 +257,11 @@ Profile::create(const std::string& srsInitString,
     {
         OE_INFO << LC << "No extents given, making some up.\n";
         Bounds bounds;
-        if (srs->guessBounds(bounds))
+        if (srs->getBounds(bounds))
         {
             if (numTilesWideAtLod0 == 0 || numTilesHighAtLod0 == 0)
             {
-                double ar = (bounds.width() / bounds.height());
+                double ar = width(bounds) / height(bounds);
                 if (ar >= 1.0) {
                     int ari = (int)ar;
                     numTilesHighAtLod0 = 1;
@@ -251,7 +296,9 @@ Profile::create( const ProfileOptions& options )
     // Check for a "well known named" profile:
     if ( options.namedProfile().isSet() )
     {
-        result = Profile::createNamed(options.namedProfile().get());
+        result = Profile::create_with_vdatum(
+            options.namedProfile().get(),
+            options.vsrsString().get());
     }
 
     // Next check for a user-defined extents:
@@ -304,23 +351,51 @@ Profile::create( const ProfileOptions& options )
 }
 
 const Profile*
-Profile::createNamed(const std::string& name)
+Profile::create(const std::string& name)
 {
-    // TODO: move the named profiles from Registry into here.
-    if ( ciEquals(name, "plate-carre") || ciEquals(name, "eqc-wgs84") )
+    return create_with_vdatum(name, {});
+}
+
+const Profile*
+Profile::create_with_vdatum(const std::string& name, const std::string& vsrsString)
+{
+    if ( ciEquals(name, PLATE_CARREE) || ciEquals(name, "plate-carre") || ciEquals(name, "eqc-wgs84") )
     {
         // Yes I know this is not really Plate Carre but it will stand in for now.
         osg::Vec3d ex;
-        const SpatialReference* plateCarre = SpatialReference::get("plate-carre");
-        const SpatialReference* wgs84 = SpatialReference::get("wgs84");
+        const SpatialReference* plateCarre = SpatialReference::get("plate-carre", vsrsString);
+        const SpatialReference* wgs84 = SpatialReference::get("wgs84", vsrsString);
         wgs84->transform(osg::Vec3d(180,90,0), plateCarre, ex);
 
-        return Profile::create(plateCarre, -ex.x(), -ex.y(), ex.x(), ex.y(), 2u, 1u);
+        return Profile::create(PLATE_CARREE, plateCarre, -ex.x(), -ex.y(), ex.x(), ex.y(), 2u, 1u);
     }
-
+    else if (ciEquals(name, GLOBAL_GEODETIC))
+    {
+        return create(
+            GLOBAL_GEODETIC,
+            SpatialReference::create("wgs84", vsrsString),
+            -180.0, -90.0, 180.0, 90.0,
+            2, 1);
+    }
+    else if (ciEquals(name, GLOBAL_MERCATOR))
+    {
+        return create(
+            GLOBAL_MERCATOR,
+            SpatialReference::create("global-mercator", vsrsString),
+            MERC_MINX, MERC_MINY, MERC_MAXX, MERC_MAXY,
+            1, 1);
+    }
+    else if (ciEquals(name, SPHERICAL_MERCATOR))
+    {
+        return create(
+            SPHERICAL_MERCATOR,
+            SpatialReference::create("spherical-mercator", vsrsString),
+            MERC_MINX, MERC_MINY, MERC_MAXX, MERC_MAXY,
+            1, 1);
+    }
     else
     {
-        return osgEarth::Registry::instance()->getNamedProfile( name );
+        return create(name, vsrsString);
     }
 }
 
@@ -332,9 +407,9 @@ Profile::Profile(const SpatialReference* srs,
                  unsigned int numTilesWideAtLod0,
                  unsigned int numTilesHighAtLod0) :
 
-osg::Referenced( true )
+    _extent(srs, xmin, ymin, xmax, ymax)
 {
-    _extent = GeoExtent( srs, xmin, ymin, xmax, ymax );
+    OE_SOFT_ASSERT(srs!=nullptr);
 
     _numTilesWideAtLod0 = numTilesWideAtLod0 != 0? numTilesWideAtLod0 : srs->isGeographic()? 2 : 1;
     _numTilesHighAtLod0 = numTilesHighAtLod0 != 0? numTilesHighAtLod0 : 1;
@@ -346,9 +421,12 @@ osg::Referenced( true )
 
     // make a profile sig (sans srs) and an srs sig for quick comparisons.
     ProfileOptions temp = toProfileOptions();
-    _fullSignature = Stringify() << std::hex << hashString( temp.getConfig().toJSON() );
+    std::string fullJSON = temp.getConfig().toJSON();
+    _fullSignature =  Stringify() << std::hex << hashString(fullJSON);
     temp.vsrsString() = "";
     _horizSignature = Stringify() << std::hex << hashString( temp.getConfig().toJSON() );
+
+    _hash = std::hash<std::string>()(fullJSON);
 }
 
 Profile::Profile(const SpatialReference* srs,
@@ -357,9 +435,9 @@ Profile::Profile(const SpatialReference* srs,
                  unsigned int numTilesWideAtLod0,
                  unsigned int numTilesHighAtLod0 ) :
 
-osg::Referenced( true )
+    _extent(srs, xmin, ymin, xmax, ymax)
 {
-    _extent = GeoExtent( srs, xmin, ymin, xmax, ymax );
+    OE_SOFT_ASSERT(srs!=nullptr);
 
     _numTilesWideAtLod0 = numTilesWideAtLod0 != 0? numTilesWideAtLod0 : srs->isGeographic()? 2 : 1;
     _numTilesHighAtLod0 = numTilesHighAtLod0 != 0? numTilesHighAtLod0 : 1;
@@ -368,24 +446,14 @@ osg::Referenced( true )
         srs->getGeographicSRS(),
         geo_xmin, geo_ymin, geo_xmax, geo_ymax );
 
-    //if ( !_vsrs.valid() )
-    //    _vsrs = Registry::instance()->getDefaultVSRS();
-
     // make a profile sig (sans srs) and an srs sig for quick comparisons.
     ProfileOptions temp = toProfileOptions();
-    _fullSignature = Stringify() << std::hex << hashString( temp.getConfig().toJSON() );
+    std::string fullJSON = temp.getConfig().toJSON();
+    _fullSignature =  Stringify() << std::hex << hashString(fullJSON);
     temp.vsrsString() = "";
     _horizSignature = Stringify() << std::hex << hashString( temp.getConfig().toJSON() );
-}
 
-Profile::ProfileType
-Profile::getProfileType() const
-{
-    return
-        _extent.isValid() && _extent.getSRS()->isGeographic() ? TYPE_GEODETIC :
-        _extent.isValid() && _extent.getSRS()->isMercator() ? TYPE_MERCATOR :
-        _extent.isValid() && _extent.getSRS()->isProjected() ? TYPE_LOCAL :
-        TYPE_UNKNOWN;
+    _hash = std::hash<std::string>()(fullJSON);
 }
 
 bool
@@ -416,7 +484,7 @@ Profile::toString() const
         << std::setprecision(16)
         << "[srs=" << srs->getName() << ", min=" << _extent.xMin() << "," << _extent.yMin()
         << " max=" << _extent.xMax() << "," << _extent.yMax()
-        << " lod0=" << _numTilesWideAtLod0 << "," << _numTilesHighAtLod0
+        << " ar=" << _numTilesWideAtLod0 << ":" << _numTilesHighAtLod0
         << " vdatum=" << (srs->getVerticalDatum() ? srs->getVerticalDatum()->getName() : "geodetic")
         << "]";
 }
@@ -425,14 +493,23 @@ ProfileOptions
 Profile::toProfileOptions() const
 {
     ProfileOptions op;
-    op.srsString() = getSRS()->getHorizInitString();
-    op.vsrsString() = getSRS()->getVertInitString();
-    op.bounds()->xMin() = _extent.xMin();
-    op.bounds()->yMin() = _extent.yMin();
-    op.bounds()->xMax() = _extent.xMax();
-    op.bounds()->yMax() = _extent.yMax();
-    op.numTilesWideAtLod0() = _numTilesWideAtLod0;
-    op.numTilesHighAtLod0() = _numTilesHighAtLod0;
+    if (_wellKnownName.empty() == false)
+    {
+        op.namedProfile() = _wellKnownName;
+        if (!getSRS()->getVertInitString().empty())
+            op.vsrsString() = getSRS()->getVertInitString();
+    }
+    else
+    {
+        op.srsString() = getSRS()->getHorizInitString();
+        op.vsrsString() = getSRS()->getVertInitString();
+        op.bounds().mutable_value().xMin() = _extent.xMin();
+        op.bounds().mutable_value().yMin() = _extent.yMin();
+        op.bounds().mutable_value().xMax() = _extent.xMax();
+        op.bounds().mutable_value().yMax() = _extent.yMax();
+        op.numTilesWideAtLod0() = _numTilesWideAtLod0;
+        op.numTilesHighAtLod0() = _numTilesHighAtLod0;
+    }
     return op;
 }
 
@@ -470,7 +547,7 @@ Profile::getAllKeysAtLOD( unsigned lod, std::vector<TileKey>& out_keys ) const
 }
 
 GeoExtent
-Profile::calculateExtent( unsigned int lod, unsigned int tileX, unsigned int tileY )
+Profile::calculateExtent( unsigned int lod, unsigned int tileX, unsigned int tileY ) const
 {
     double width, height;
     getTileDimensions(lod, width, height);
@@ -481,18 +558,6 @@ Profile::calculateExtent( unsigned int lod, unsigned int tileX, unsigned int til
     double ymin = ymax - height;
 
     return GeoExtent( getSRS(), xmin, ymin, xmax, ymax );
-}
-
-//TODO: DEPRECATE THIS and replace by examining the SRS itself.
-Profile::ProfileType
-Profile::getProfileTypeFromSRS(const std::string& srs_string)
-{
-    osg::ref_ptr<SpatialReference> srs = SpatialReference::create( srs_string );
-    return 
-        srs.valid() && srs->isGeographic()? Profile::TYPE_GEODETIC :
-        srs.valid() && srs->isMercator()? Profile::TYPE_MERCATOR :
-        srs.valid() && srs->isProjected()? Profile::TYPE_LOCAL :
-        Profile::TYPE_UNKNOWN;
 }
 
 bool
@@ -510,14 +575,12 @@ Profile::isHorizEquivalentTo( const Profile* rhs ) const
 void
 Profile::getTileDimensions(unsigned int lod, double& out_width, double& out_height) const
 {
-    out_width  = (_extent.xMax() - _extent.xMin()) / (double)_numTilesWideAtLod0;
-    out_height = (_extent.yMax() - _extent.yMin()) / (double)_numTilesHighAtLod0;
+    out_width  = _extent.width() / (double)_numTilesWideAtLod0;
+    out_height = _extent.height() / (double)_numTilesHighAtLod0;
 
-    for (unsigned int i = 0; i < lod; ++i)
-    {
-        out_width /= 2.0;
-        out_height /= 2.0;
-    }
+    double factor = double(1u << lod);
+    out_width /= (double)factor;
+    out_height /= (double)factor;
 }
 
 void
@@ -526,11 +589,9 @@ Profile::getNumTiles(unsigned int lod, unsigned int& out_tiles_wide, unsigned in
     out_tiles_wide = _numTilesWideAtLod0;
     out_tiles_high = _numTilesHighAtLod0;
 
-    for (unsigned int i = 0; i < lod; ++i)
-    {
-        out_tiles_wide *= 2;
-        out_tiles_high *= 2;
-    }
+    double factor = double(1u << lod);
+    out_tiles_wide *= factor;
+    out_tiles_high *= factor;
 }
 
 unsigned int
@@ -583,7 +644,21 @@ Profile::createTileKey( double x, double y, unsigned int level ) const
     }
 }
 
-#if 1
+TileKey
+Profile::createTileKey(const GeoPoint& point, unsigned level) const
+{
+    if (!point.isValid())
+        return TileKey::INVALID;
+
+    if (point.getSRS()->isHorizEquivalentTo(getSRS()))
+    {
+        return createTileKey(point.x(), point.y(), level);
+    }
+    else
+    {
+        return createTileKey(point.transform(getSRS()), level);
+    }
+}
 
 GeoExtent
 Profile::clampAndTransformExtent(const GeoExtent& input, bool* out_clamped) const
@@ -591,6 +666,17 @@ Profile::clampAndTransformExtent(const GeoExtent& input, bool* out_clamped) cons
     // initialize the output flag
     if ( out_clamped )
         *out_clamped = false;
+
+    // null checks
+    if (input.isInvalid())
+        return GeoExtent::INVALID;
+
+    if (input.isWholeEarth())
+    {
+        if (out_clamped && !getExtent().isWholeEarth())
+            *out_clamped = true;
+        return getExtent();
+    }
 
     // begin by transforming the input extent to this profile's SRS.
     GeoExtent inputInMySRS = input.transform(getSRS());
@@ -655,77 +741,6 @@ Profile::clampAndTransformExtent(const GeoExtent& input, bool* out_clamped) cons
     }    
 }
 
-#else
-
-GeoExtent
-Profile::clampAndTransformExtent( const GeoExtent& input, bool* out_clamped ) const
-{
-    if ( out_clamped )
-        *out_clamped = false;
-
-    // do the clamping in LAT/LONG.
-    const SpatialReference* geo_srs = getSRS()->getGeographicSRS();
-
-    // get the input in lat/long:
-    GeoExtent gcs_input =
-        input.getSRS()->isGeographic()?
-        input :
-        input.transform( geo_srs );
-
-    // bail out on a bad transform:
-    if ( !gcs_input.isValid() )
-        return GeoExtent::INVALID;
-
-    // bail out if the extent's do not intersect at all:
-    if ( !gcs_input.intersects(_latlong_extent, false) )
-        return GeoExtent::INVALID;
-
-    // clamp it to the profile's extents:
-    GeoExtent clamped_gcs_input = GeoExtent(
-        gcs_input.getSRS(),
-        osg::clampBetween( gcs_input.xMin(), _latlong_extent.xMin(), _latlong_extent.xMax() ),
-        osg::clampBetween( gcs_input.yMin(), _latlong_extent.yMin(), _latlong_extent.yMax() ),
-        osg::clampBetween( gcs_input.xMax(), _latlong_extent.xMin(), _latlong_extent.xMax() ),
-        osg::clampBetween( gcs_input.yMax(), _latlong_extent.yMin(), _latlong_extent.yMax() ) );
-
-    if ( out_clamped )
-        *out_clamped = (clamped_gcs_input != gcs_input);
-
-    // finally, transform the clamped extent into this profile's SRS and return it.
-    GeoExtent result =
-        clamped_gcs_input.getSRS()->isEquivalentTo( this->getSRS() )?
-        clamped_gcs_input :
-        clamped_gcs_input.transform( this->getSRS() );
-
-    if (result.isValid())
-    {
-        OE_DEBUG << LC << "clamp&xform: input=" << input.toString() << ", output=" << result.toString() << std::endl;
-    }
-
-    return result;
-}
-#endif
-
-namespace
-{
-    double round( double in, int places )
-    {
-        for(int i=0; i<places; ++i)
-            in *= 10.0;
-        in = ceil(in);
-        for(int i=0; i<places; ++i)
-            in *= 0.1;
-        return in;
-    }
-
-    int quantize( double in, double epsilon )
-    {
-        int floored = (int)in;
-        int floored2 = (int)(in + epsilon);
-        return floored == floored2 ? floored : floored2;
-    }
-}
-
 void
 Profile::addIntersectingTiles(const GeoExtent& key_ext, unsigned localLOD, std::vector<TileKey>& out_intersectingKeys) const
 {
@@ -742,20 +757,32 @@ Profile::addIntersectingTiles(const GeoExtent& key_ext, unsigned localLOD, std::
     double destTileWidth, destTileHeight;
     getTileDimensions(localLOD, destTileWidth, destTileHeight);
 
-    //OE_DEBUG << std::fixed << "  Source Tile: " << key.getLevelOfDetail() << " (" << keyWidth << ", " << keyHeight << ")" << std::endl;
-    //OE_DEBUG << std::fixed << "  Dest Size: " << destLOD << " (" << destTileWidth << ", " << destTileHeight << ")" << std::endl;
-
+    double west = key_ext.xMin() - _extent.xMin();
     double east = key_ext.xMax() - _extent.xMin();
-    bool xMaxOnTileBoundary = fmod(east, destTileWidth) == 0.0;
-
     double south = _extent.yMax() - key_ext.yMin();
-    bool yMaxOnTileBoundary = fmod(south, destTileHeight) == 0.0;
+    double north = _extent.yMax() - key_ext.yMax();
 
-    tileMinX = (int)((key_ext.xMin() - _extent.xMin()) / destTileWidth);
-    tileMaxX = (int)(east / destTileWidth) - (xMaxOnTileBoundary ? 1 : 0);
+    tileMinX = (int)(west / destTileWidth);
+    tileMaxX = (int)(east / destTileWidth);
 
-    tileMinY = (int)((_extent.yMax() - key_ext.yMax()) / destTileHeight); 
-    tileMaxY = (int)(south / destTileHeight) - (yMaxOnTileBoundary ? 1 : 0);
+    tileMinY = (int)(north / destTileHeight);
+    tileMaxY = (int)(south / destTileHeight);
+
+    // If the east or west border fell right on a tile boundary
+    // but doesn't actually use that tile, detect that and eliminate
+    // the extranous tiles. (This happens commonly when mapping
+    // geodetic to mercator for example)
+
+    double quantized_west = destTileWidth * (double)tileMinX;
+    double quantized_east = destTileWidth * (double)(tileMaxX + 1);
+
+    if (osg::equivalent(west - quantized_west, destTileWidth))
+        ++tileMinX;
+    if (osg::equivalent(quantized_east - east, destTileWidth))
+        --tileMaxX;
+
+    if (tileMaxX < tileMinX)
+        tileMaxX = tileMinX;
 
     unsigned int numWide, numHigh;
     getNumTiles(localLOD, numWide, numHigh);
@@ -840,14 +867,20 @@ Profile::getIntersectingTiles(const GeoExtent& extent, unsigned localLOD, std::v
 
 unsigned
 Profile::getEquivalentLOD( const Profile* rhsProfile, unsigned rhsLOD ) const
-{    
+{
+    OE_SOFT_ASSERT_AND_RETURN(rhsProfile!=nullptr, rhsLOD);
+
     //If the profiles are equivalent, just use the incoming lod
     if (rhsProfile->isHorizEquivalentTo( this ) ) 
         return rhsLOD;
 
+    static osg::ref_ptr<const Profile> ggProfile = Profile::create(Profile::GLOBAL_GEODETIC);
+    static osg::ref_ptr<const Profile> smProfile = Profile::create(Profile::SPHERICAL_MERCATOR);
+
     // Special check for geodetic to mercator or vise versa, they should match up in LOD.
-    if ((rhsProfile->isEquivalentTo(Registry::instance()->getSphericalMercatorProfile()) && isEquivalentTo(Registry::instance()->getGlobalGeodeticProfile())) ||
-        (rhsProfile->isEquivalentTo(Registry::instance()->getGlobalGeodeticProfile()) && isEquivalentTo(Registry::instance()->getSphericalMercatorProfile())))
+    // TODO not sure about this.. -gw
+    if ((rhsProfile->isEquivalentTo(smProfile.get()) && isEquivalentTo(ggProfile.get())) ||
+        (rhsProfile->isEquivalentTo(ggProfile.get()) && isEquivalentTo(smProfile.get())))
     {
         return rhsLOD;
     }
@@ -890,6 +923,38 @@ Profile::getEquivalentLOD( const Profile* rhsProfile, unsigned rhsLOD ) const
             // We are further away from the previous lod so stop.
             break;
         }        
+        currLOD++;
+    }
+    return destLOD;
+}
+
+unsigned
+Profile::getLOD(double height) const
+{
+    int currLOD = 0;
+    int destLOD = currLOD;
+
+    double delta = DBL_MAX;
+
+    // Find the LOD that most closely matches the target height in this profile.
+    while (true)
+    {
+        double prevDelta = delta;
+
+        double w, h;
+        getTileDimensions(currLOD, w, h);
+
+        delta = osg::absolute(h - height);
+        if (delta < prevDelta)
+        {
+            // We're getting closer so keep going
+            destLOD = currLOD;
+        }
+        else
+        {
+            // We are further away from the previous lod so stop.
+            break;
+        }
         currLOD++;
     }
     return destLOD;

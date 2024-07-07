@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -22,13 +22,14 @@
 #include <osgEarth/MetaTile>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 #define LC "[MetaImage] "
 
 
 MetaImage::Tile::Tile() :
-_valid(false),
-_read(0L)
+_failed(false),
+_read(nullptr)
 {
     //nop
 }
@@ -43,10 +44,8 @@ MetaImage::setImage(int x, int y, osg::Image* image, const osg::Matrix& scaleBia
         // We store this reference just in case the caller does not hold on to it,
         // in which case the PixelReader would have a dangling pointer and crash.
         _tiles[x][y]._imageRef = image;
-
         _tiles[x][y]._read.setImage(image);
         _tiles[x][y]._scaleBias = scaleBias;
-        _tiles[x][y]._valid = true;
 
         return true;
     }
@@ -57,7 +56,7 @@ MetaImage::setImage(int x, int y, osg::Image* image, const osg::Matrix& scaleBia
     }
 }
 
-osg::Image*
+const osg::Image*
 MetaImage::getImage(int x, int y) const
 {
     x = osg::clampBetween(x+1, 0, 2);
@@ -74,7 +73,7 @@ MetaImage::getScaleBias(int x, int y) const
 }
 
 bool
-MetaImage::read(double u, double v, osg::Vec4& output) const
+MetaImage::read(double u, double v, osg::Vec4f& output)
 {
     // clamp the input coordinates to the legal range:
     u = osg::clampBetween(u, -1.0, 2.0);
@@ -86,7 +85,7 @@ MetaImage::read(double u, double v, osg::Vec4& output) const
 
     const Tile& tile = _tiles[x][y];
 
-    if (!tile._valid)
+    if (!tile._imageRef.valid())
         return false;
 
     // transform the coordinates to the tile:
@@ -97,7 +96,7 @@ MetaImage::read(double u, double v, osg::Vec4& output) const
     u = u * tile._scaleBias(0, 0) + tile._scaleBias(3, 0);
     v = v * tile._scaleBias(1, 1) + tile._scaleBias(3, 1);
 
-    output = tile._read(u, v);
+    tile._read(output, u, v);
     return true;
 }
 
@@ -107,7 +106,7 @@ MetaImage::dump() const
     for (int x = 0; x <= 2; ++x) {
         for (int y = 0; y <= 2; ++y) {
             const Tile& tile = _tiles[x][y];
-            if (!tile._valid) {
+            if (!tile._imageRef.valid()) {
                 OE_INFO << "    [" << x << "][" << y << "]: invalid\n";
             }
             else {
@@ -118,4 +117,68 @@ MetaImage::dump() const
             }                
         }
     }
+}
+
+//...................................................................
+
+TileKeyMetaImage::TileKeyMetaImage() :
+    MetaImage()
+{
+    //nop
+}
+
+void
+TileKeyMetaImage::setTileKey(const TileKey& value)
+{
+    _center = value;
+}
+
+void
+TileKeyMetaImage::setCreateImageFunction(CreateImageFunction value)
+{
+    _createImage = value;
+}
+
+bool
+TileKeyMetaImage::read(
+    double u,
+    double v,
+    osg::Vec4f& output)
+{
+    // clamp the input coordinates to the legal range:
+    u = osg::clampBetween(u, -1.0, 2.0);
+    v = osg::clampBetween(v, -1.0, 2.0);
+
+    // resolve the tile to sample:
+    int x = u < 0.0 ? 0 : u <= 1.0 ? 1 : 2;
+    int y = v < 0.0 ? 2 : v <= 1.0 ? 1 : 0;
+
+    Tile& tile = _tiles[x][y];
+
+    // if we already tried to load this tile and failed, bail out
+    if (tile._failed)
+    {
+        return false;
+    }
+
+    // if we still need to load this tile, do so
+    if (!tile._imageRef.valid() && _createImage != nullptr)
+    {
+        // Always use the immediate parent for fractal refinement.
+        TileKey key = _center.createNeighborKey(x - 1, y - 1);
+
+        GeoImage result = _createImage(key, nullptr);
+        if (result.valid())
+        {
+            tile._imageRef = result.getImage();
+            //actualKey.getExtent().createScaleBias(parentKey.getExtent(), comp.scaleBias);
+            tile._read.setImage(tile._imageRef.get());
+        }
+        else
+        {
+            tile._failed = true;
+        }
+    }
+
+    return MetaImage::read(u, v, output);
 }

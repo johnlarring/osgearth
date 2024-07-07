@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -59,13 +59,15 @@ namespace osgEarth { namespace Splat
     {
         optional<unsigned>        _maxLOD;
         optional<URI>             _imageURI;
+        optional<URI>             _normalURI;
         optional<URI>             _modelURI;
         optional<int>             _modelCount;
         optional<int>             _modelLevel;
         optional<SplatDetailData> _detail;
 
-        // catalog will populate this value
-        int _textureIndex;
+        // catalog will populate these values
+        int _diffuseTextureIndex;
+        int _materialTextureIndex;
 
         SplatRangeData();
         SplatRangeData(const Config& conf);
@@ -88,9 +90,9 @@ namespace osgEarth { namespace Splat
         Config getConfig() const;
     };
     
-    typedef osgEarth::fast_map<std::string, SplatClass> SplatClassMap;
-  
-    typedef osgEarth::fast_map<std::string /*className*/, SplatRangeDataVector> SplatLUT;
+    using SplatClassMap = std::unordered_map<std::string, SplatClass>;
+
+    using SplatLUT = std::unordered_map<std::string /*className*/, SplatRangeDataVector>;
 
     // Defines the splatting texture and associated lookup table.
     struct SplatTextureDef
@@ -98,10 +100,9 @@ namespace osgEarth { namespace Splat
         osg::ref_ptr<osg::Texture2DArray> _texture;
         SplatLUT                          _splatLUT;
         osg::ref_ptr<osg::Texture>        _splatLUTBuffer;
-        std::string                       _samplingFunction;
+        void resizeGLObjectBuffers(unsigned maxSize);
+        void releaseGLObjects(osg::State* state) const;
     };
-    
-    typedef std::vector<SplatTextureDef> SplatTextureDefVector;
 
     /**
      * Catalog of texture-splatting classes. Usually these correspond
@@ -163,7 +164,6 @@ namespace osgEarth { namespace Splat
         optional<std::string> _name;
         optional<std::string> _description;
         SplatClassMap         _classes;
-        SplatTextureDef       _textureDef;
     };
 
 } } // namespace osgEarth::Splat

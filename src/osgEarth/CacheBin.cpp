@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -23,8 +23,13 @@
 #include <osgDB/FileNameUtils>
 #include <osgDB/Registry>
 #include <osg/TextureBuffer>
+#include <osgEarth/Notify>
 
 using namespace osgEarth;
+
+// Uncomment to enable node caching.
+// Temporarily disabled.
+#define ENABLE_NODE_CACHING
 
 
 // serializer for osg::DummyObject (not present in OSG)
@@ -169,7 +174,7 @@ namespace
     {
         CacheBin*               _bin;
         const osgDB::Options*   _writeOptions;
-        static Threading::Mutex _globalMutex;
+        static Threading::Gate<osg::Image*> _imageGate;
 
         // constructor
         WriteExternalReferencesToCache(CacheBin* bin, const osgDB::Options* writeOptions)
@@ -203,9 +208,8 @@ namespace
 
             if (!osgEarth::endsWith(path, ".osgearth_cachebin"))
             {
-                // take a plugin-global mutex to avoid two threads altering the image
-                // at the same time
-                Threading::ScopedMutexLock lock(_globalMutex);
+                // Allow only one reference to the same image through at a time
+                Threading::ScopedGate<osg::Image*> _lockImage(_imageGate, &image);
 
                 if (!osgEarth::endsWith(path, ".osgearth_cachebin"))
                 {
@@ -243,7 +247,7 @@ namespace
     };
 
     
-    Threading::Mutex WriteExternalReferencesToCache::_globalMutex;
+    Threading::Gate<osg::Image*> WriteExternalReferencesToCache::_imageGate;
 }
 
 
@@ -253,16 +257,19 @@ CacheBin::writeNode(const std::string&    key,
                     const Config&         metadata,
                     const osgDB::Options* writeOptions)
 {
-    // Preparation step - removes things like UserDataContainers
-    PrepareForCaching prep;
-    node->accept( prep );
+    if (_enableNodeCaching)
+    {
+        // Preparation step - removes things like UserDataContainers
+        PrepareForCaching prep;
+        node->accept(prep);
 
-    // Write external refs (like texture images) to the cache bin
-    WriteExternalReferencesToCache writeRefs(this, writeOptions);
-    node->accept( writeRefs );
+        // Write external refs (like texture images) to the cache bin
+        WriteExternalReferencesToCache writeRefs(this, writeOptions);
+        node->accept(writeRefs);
 
-    // finally, write the graph to the bin:
-    write(key, node, metadata, writeOptions);
+        // finally, write the graph to the bin:
+        write(key, node, metadata, writeOptions);
+    }
 
     return true;
 }

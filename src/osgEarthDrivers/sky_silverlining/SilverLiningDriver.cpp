@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -22,22 +22,35 @@
 #include <osgEarth/Map>
 #include <osgEarth/MapNode>
 #include <osgEarth/NodeUtils>
-#include <osgEarthUtil/Controls>
-#include <osgEarthUtil/ExampleResources>
+#include <osgEarth/ExampleResources>
+
+#ifdef OSGEARTH_HAVE_CONTROLS_API
+#include <osgEarth/Controls>
+namespace ui = osgEarth::Util::Controls;
+#endif
 
 #define LC "[SilverLiningExtension] "
 
 using namespace osgEarth::Util;
-namespace ui = osgEarth::Util::Controls;
 
 namespace osgEarth { namespace SilverLining
 {
-    class SilverLiningExtension : public Extension,
-                                  public ExtensionInterface<MapNode>,
-                                  public ExtensionInterface<osg::View>,
-                                  public ExtensionInterface<ui::Control>,
-                                  public SilverLiningOptions,
-                                  public SkyNodeFactory
+#ifdef OSGEARTH_HAVE_CONTROLS_API
+    class SilverLiningExtension :
+        public Extension,
+        public ExtensionInterface<MapNode>,
+        public ExtensionInterface<osg::View>,
+        public ExtensionInterface<ui::Control>,
+        public SilverLiningOptions,
+        public SkyNodeFactory
+#else
+    class SilverLiningExtension :
+        public Extension,
+        public ExtensionInterface<MapNode>,
+        public ExtensionInterface<osg::View>,
+        public SilverLiningOptions,
+        public SkyNodeFactory
+#endif
     {
     public:
         META_OE_Extension(osgEarth, SilverLiningExtension, sky_silverlining);
@@ -60,8 +73,8 @@ namespace osgEarth { namespace SilverLining
             _skynode = createSkyNode();
             if (mapNode->getMapSRS()->isProjected())
             {
-                GeoPoint refPoint;
-                mapNode->getMap()->getProfile()->getExtent().getCentroid(refPoint);
+                GeoPoint refPoint = 
+                    mapNode->getMap()->getProfile()->getExtent().getCentroid();
                 _skynode->setReferencePoint(refPoint);
             }                
             osgEarth::insertParent(_skynode.get(), mapNode);
@@ -91,14 +104,14 @@ namespace osgEarth { namespace SilverLining
             return true;
         }
 
-
+#ifdef OSGEARTH_HAVE_CONTROLS_API
     public: // ExtensionInterface<Control>
 
         bool connect(ui::Control* control)
         {
-            ui::Container* container = dynamic_cast<ui::Container*>(control);
-            if (container)
-                container->addControl(SkyControlFactory::create(_skynode.get()));
+            //ui::Container* container = dynamic_cast<ui::Container*>(control);
+            //if (container)
+            //    container->addControl(SkyControlFactory::create(_skynode.get()));
             return true;
         }
 
@@ -107,6 +120,7 @@ namespace osgEarth { namespace SilverLining
             //todo
             return false;
         }
+#endif
 
     public: // SkyNodeFactory
 

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -19,6 +19,8 @@
 #include <osgEarth/Horizon>
 #include <osgUtil/CullVisitor>
 #include <osgEarth/Registry>
+#include <osgEarth/CullingUtils>
+#include <osgEarth/Utils>
 #include <osg/Geometry>
 #include <osg/Geode>
 
@@ -36,10 +38,10 @@ _valid( false ),
 _VCmag(0), _VCmag2(0), _VHmag2(0), _coneCos(0), _coneTan(0), _minVCmag(0), _minHAE(0)
 {
     setName(OSGEARTH_HORIZON_UDC_NAME);
-    setEllipsoid(osg::EllipsoidModel());
+    setEllipsoid(Ellipsoid());
 }
 
-Horizon::Horizon(const osg::EllipsoidModel& e) :
+Horizon::Horizon(const Ellipsoid& e) :
 _valid( false ),
 _VCmag(0), _VCmag2(0), _VHmag2(0), _coneCos(0), _coneTan(0), _minVCmag(0), _minHAE(0)
 {
@@ -54,12 +56,13 @@ _VCmag(0), _VCmag2(0), _VHmag2(0), _coneCos(0), _coneTan(0), _minVCmag(0), _minH
     setName(OSGEARTH_HORIZON_UDC_NAME);
     if ( srs && !srs->isProjected() )
     {
-        setEllipsoid( *srs->getEllipsoid() );
+        setEllipsoid( srs->getEllipsoid() );
     }
 }
 
 Horizon::Horizon(const Horizon& rhs, const osg::CopyOp& op) :
 osg::Object( rhs, op ),
+_em      ( rhs._em ),
 _valid   ( rhs._valid ),
 _scale   ( rhs._scale ),
 _scaleInv( rhs._scaleInv ),
@@ -77,32 +80,20 @@ _minHAE  ( rhs._minHAE )
     // nop
 }
 
-bool
-Horizon::put(osg::NodeVisitor& nv)
-{
-    return VisitorData::store( nv, OSGEARTH_HORIZON_UDC_NAME, this );
-}
-
-Horizon* Horizon::get(osg::NodeVisitor& nv)
-{
-    return VisitorData::fetch<Horizon>( nv, OSGEARTH_HORIZON_UDC_NAME );
-}
-
 void
-Horizon::setEllipsoid(const osg::EllipsoidModel& e)
+Horizon::setEllipsoid(const Ellipsoid& em)
 {
-    _em.setRadiusEquator(e.getRadiusEquator());
-    _em.setRadiusPolar(e.getRadiusPolar());
+    _em = em;
 
     _scaleInv.set(
-        e.getRadiusEquator(),
-        e.getRadiusEquator(),
-        e.getRadiusPolar() );
+        em.getRadiusEquator(),
+        em.getRadiusEquator(),
+        em.getRadiusPolar() );
 
     _scale.set(
-        1.0 / e.getRadiusEquator(),
-        1.0 / e.getRadiusEquator(),
-        1.0 / e.getRadiusPolar() );
+        1.0 / em.getRadiusEquator(),
+        1.0 / em.getRadiusEquator(),
+        1.0 / em.getRadiusPolar() );
 
     _minHAE = 500.0;
     _minVCmag = 1.0 + (_scale*_minHAE).length();
@@ -131,7 +122,7 @@ Horizon::setEye(const osg::Vec3d& eye)
     _eyeUnit.normalize();
 
     _VC     = osg::componentMultiply( -_eye, _scale );  // viewer->center (scaled)
-    _VCmag  = std::max( _VC.length(), _minVCmag );      // clamped to the min HAE
+    _VCmag  = osg::maximum( _VC.length(), _minVCmag );      // clamped to the min HAE
     _VCmag2 = _VCmag*_VCmag;
     _VHmag2 = _VCmag2 - 1.0;  // viewer->horizon line (scaled)
 
@@ -240,7 +231,7 @@ Horizon::isVisible(const osg::Vec3d& eye,
     if ( radius > 0.0 )
     {
         eyeUnit = eye;
-        eyeUnit->normalize();
+        eyeUnit.mutable_value().normalize();
         delta.set( eyeUnit.get()*radius );
     }
     osg::Vec3d VT( target+delta - eye );
@@ -259,7 +250,7 @@ Horizon::isVisible(const osg::Vec3d& eye,
     // (since the above test failed) the target is occluded.
     // NOTE: it might be better instead to check for a maximum distance from
     // the eyepoint instead.
-    double VCmag = std::max( VC.length(), _minVCmag );      // clamped to the min HAE
+    double VCmag = osg::maximum( VC.length(), _minVCmag );      // clamped to the min HAE
     if ( VCmag < 0.0 )
     {
         return false;
@@ -287,7 +278,7 @@ Horizon::isVisible(const osg::Vec3d& eye,
 
     if ( !eyeUnit.isSet() ) {
         eyeUnit = eye;
-        eyeUnit->normalize();
+        eyeUnit.mutable_value().normalize();
     }
     double a = VT * -eyeUnit.get();
     double b = a * coneTan;
@@ -339,8 +330,11 @@ Horizon::getDistanceToVisibleHorizon() const
     double eyeLen = _eye.length();
 
     osg::Vec3d geodetic;
-    double lat, lon, hasl;
-    _em.convertXYZToLatLongHeight(_eye.x(), _eye.y(), _eye.z(), lat, lon, hasl);
+    //double lat, lon, hasl;
+    //_em.convertXYZToLatLongHeight(_eye.x(), _eye.y(), _eye.z(), lat, lon, hasl);
+
+    geodetic = _em.geocentricToGeodetic(_eye);
+    double hasl = geodetic.z();
 
     // limit it:
     hasl = osg::maximum(hasl, 100.0);
@@ -353,10 +347,19 @@ Horizon::getDistanceToVisibleHorizon() const
 
 
 HorizonCullCallback::HorizonCullCallback() :
-_enabled   ( true ),
-_centerOnly( false )
+    _enabled(true),
+    _centerOnly(false),
+    _customEllipsoidSet(false)
 {
     //nop
+}
+
+void
+HorizonCullCallback::setEllipsoid(const Ellipsoid& em)
+{
+    _customEllipsoid.setSemiMajorAxis(em.getRadiusEquator());
+    _customEllipsoid.setSemiMinorAxis(em.getRadiusPolar());
+    _customEllipsoidSet = true;
 }
 
 bool
@@ -365,18 +368,31 @@ HorizonCullCallback::isVisible(osg::Node* node, osg::NodeVisitor* nv)
     if ( !node )
         return false;
 
-    osg::NodePath np = nv->getNodePath();
-    osg::Matrix local2world;
-    Horizon* horizon = Horizon::get(*nv);
+    osg::ref_ptr<Horizon> horizon;
+    ObjectStorage::get(nv, horizon);
+
+    if (_customEllipsoidSet)
+    {
+        osg::Vec3d eye;
+        if (horizon.valid())
+            eye = horizon->getEye();
+        else
+            eye = osg::Vec3d(0,0,0) * Culling::asCullVisitor(nv)->getCurrentCamera()->getInverseViewMatrix();
+
+        horizon = new Horizon(_customEllipsoid);
+        horizon->setEye(eye);
+    }
 
     // If we fetched the Horizon from the nodevisitor...
-    if ( horizon )
+    if ( horizon.valid() )
     {
         // pop the last node in the path (which is the node this callback is on)
         // to prevent double-transforming the bounding sphere's center point
+        osg::NodePath np = nv->getNodePath();
         if (!np.empty() && np.back() == node)
             np.pop_back();
-        local2world = osg::computeLocalToWorld(np);
+
+        osg::Matrix local2world = osg::computeLocalToWorld(np);
 
         const osg::BoundingSphere& bs = node->getBound();
         double radius = _centerOnly ? 0.0 : bs.radius();
@@ -387,7 +403,7 @@ HorizonCullCallback::isVisible(osg::Node* node, osg::NodeVisitor* nv)
     else
     {
         // No horizon data... just assume visibility
-        OE_WARN << LC << "No horizon info installed in callback\n";
+        //OE_WARN << LC << "No horizon info installed in callback\n";
         return true;
     }
 }
@@ -426,9 +442,9 @@ HorizonCullCallback::operator()(osg::Node* node, osg::NodeVisitor* nv)
 HorizonNode::HorizonNode()
 {
     const float r = 25.0f;
-    osg::DrawElements* de = new osg::DrawElementsUByte(GL_QUADS);
-    de->addElement(0);
-    de->addElement(1);
+    //osg::DrawElements* de = new osg::DrawElementsUByte(GL_QUADS);
+    //de->addElement(0);
+    //de->addElement(1);
 
     osg::Vec3Array* verts = new osg::Vec3Array();
     for (unsigned x = 0; x<=(unsigned)r; ++x) {
@@ -436,8 +452,8 @@ HorizonNode::HorizonNode()
         verts->push_back(osg::Vec3(-0.5f + float(x) / r,  0.5f, 0.0f));
     }
 
-    de->addElement(verts->size()-1);
-    de->addElement(verts->size()-2);
+    //de->addElement(verts->size()-1);
+    //de->addElement(verts->size()-2);
 
     for (unsigned y=0; y<=(unsigned)r; ++y) {
         verts->push_back(osg::Vec3(-0.5f, -0.5f + float(y)/r, 0.0f));
@@ -448,11 +464,14 @@ HorizonNode::HorizonNode()
     colors->push_back(osg::Vec4(1,0,0,0.5f));
 
     osg::Geometry* geom = new osg::Geometry();
+    geom->setName(typeid(*this).name());
+    geom->setUseVertexBufferObjects(true);
+
     geom->setVertexArray(verts);
     geom->setColorArray(colors);
     geom->addPrimitiveSet(new osg::DrawArrays(GL_LINES, 0, verts->size()));
     
-    geom->addPrimitiveSet(de);
+    //geom->addPrimitiveSet(de);
 
     osg::Geode* geode = new osg::Geode();
     geode->addDrawable(geom);
@@ -467,11 +486,12 @@ HorizonNode::HorizonNode()
 void
 HorizonNode::traverse(osg::NodeVisitor& nv)
 {
-    bool isStealth = (VisitorData::isSet(nv, "osgEarth.Stealth"));
+    bool temp;
+    bool isSpy = nv.getUserValue("osgEarth.Spy", temp);
 
     if (nv.getVisitorType() == nv.CULL_VISITOR)
     {
-        if (!isStealth)
+        if (!isSpy)
         {
             //Horizon* h = Horizon::get(nv);
             osg::ref_ptr<Horizon> h = new Horizon();

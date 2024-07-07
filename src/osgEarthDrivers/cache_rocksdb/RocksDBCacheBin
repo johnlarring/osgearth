@@ -27,7 +27,7 @@
 
 #define ROCKSDB_CACHE_VERSION 1
 
-namespace osgEarth { namespace Drivers { namespace RocksDBCache
+namespace osgEarth { namespace RocksDBCache
 {
     using namespace osgEarth;
 
@@ -85,7 +85,7 @@ namespace osgEarth { namespace Drivers { namespace RocksDBCache
         std::string                       _binPath;        // full path to the bin's root folder
         osg::ref_ptr<osgDB::ReaderWriter> _rw;
         osg::ref_ptr<osgDB::Options>      _rwOptions;
-        Threading::Mutex                  _rwMutex;
+        std::mutex                  _rwMutex;
         rocksdb::DB*                      _db;
         osg::ref_ptr<Tracker>             _tracker;
         bool                              _debug;
@@ -139,6 +139,6 @@ namespace osgEarth { namespace Drivers { namespace RocksDBCache
     };
 
 
-} } } // namespace osgEarth::Drivers::RocksDBCache
+} } // namespace osgEarth::RocksDBCache
 
 #endif // OSGEARTH_DRIVER_CACHE_ROCKSDB_BIN

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -34,6 +34,7 @@
 #define OE_TEST OE_NULL
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 //---------------------------------------------------------------------------
 
@@ -42,6 +43,22 @@ using namespace osgEarth;
 
 namespace
 {
+    struct RenderBinSortingVisitor
+    {
+        void apply(osgUtil::RenderBin* bin)
+        {
+            bin->setSortMode(osgUtil::RenderBin::TRAVERSAL_ORDER);
+
+            for(osgUtil::RenderBin::RenderBinList::iterator i = bin->getRenderBinList().begin();
+                i != bin->getRenderBinList().end();
+                ++i)
+            {
+                osgUtil::RenderBin* child = i->second.get();
+                apply(child);
+            }
+        }
+    };
+
     /**
      * A camera that will traverse the per-thread DrapingCullSet instead of
      * its own children.
@@ -49,9 +66,12 @@ namespace
     class DrapingCamera : public osg::Camera
     {
     public:
-        DrapingCamera(DrapingManager& dm) : osg::Camera(), _dm(dm), _camera(0L)
+        DrapingCamera(std::shared_ptr<DrapingManager> dm) : osg::Camera(), _dm(dm), _camera(0L)
         {
             setCullingActive( false );
+            osg::StateSet* ss = getOrCreateStateSet();
+            ss->setMode(GL_DEPTH_TEST, 0);
+            ss->setRenderBinDetails(dm->getRenderBinNumber(), "TraversalOrderBin", osg::StateSet::OVERRIDE_PROTECTED_RENDERBIN_DETAILS);
         }
 
     public: // osg::Node
@@ -64,13 +84,34 @@ namespace
 
         void traverse(osg::NodeVisitor& nv)
         {
-            DrapingCullSet& cullSet = _dm.get(_camera);
+            DrapingCullSet& cullSet = _dm->get(_camera);
             cullSet.accept( nv );
+
+            // manhandle the render bin sorting, since OSG ignores the override
+            // in the render bin details above
+            osgUtil::CullVisitor* cv = dynamic_cast<osgUtil::CullVisitor*>(&nv);
+            if (cv)
+            {
+                applyTraversalOrderSorting(cv->getCurrentRenderBin());
+            }
+        }
+
+        void applyTraversalOrderSorting(osgUtil::RenderBin* bin)
+        {
+            bin->setSortMode(osgUtil::RenderBin::TRAVERSAL_ORDER);
+
+            for (osgUtil::RenderBin::RenderBinList::iterator i = bin->getRenderBinList().begin();
+                i != bin->getRenderBinList().end();
+                ++i)
+            {
+                osgUtil::RenderBin* child = i->second.get();
+                applyTraversalOrderSorting(child);
+            }
         }
 
     protected:
         virtual ~DrapingCamera() { }
-        DrapingManager& _dm;
+        std::shared_ptr<DrapingManager> _dm;
         const osg::Camera* _camera;
     };
 
@@ -252,7 +293,7 @@ namespace
                     //break;
                 }
 
-                halfWidthNear = std::max(halfWidthNear, minHalfWidthNear);
+                halfWidthNear = osg::maximum(halfWidthNear, minHalfWidthNear);
             }
 
             // if the far plane is narrower than the near plane, bail out and 
@@ -340,6 +381,8 @@ _attachStencil   ( false ),
 _maxFarNearRatio ( 5.0 )
 {
     _supported = Registry::capabilities().supportsGLSL();
+
+    _drapingManager = std::make_shared<DrapingManager>();
 
     // try newer version
     const char* nfr2 = ::getenv("OSGEARTH_OVERLAY_RESOLUTION_RATIO");
@@ -464,11 +507,11 @@ DrapingTechnique::setUpCamera(OverlayDecorator::TechRTTParams& params)
         if (Registry::capabilities().supportsGLSL(140u))
         {
             //Blend Func Separate is only available on OpenGL 1.4 and above
-            blendFunc = new osg::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            blendFunc = new osg::BlendFunc(_overlaySource, _overlayDestination, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         }
         else
         {
-            blendFunc = new osg::BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            blendFunc = new osg::BlendFunc(_overlaySource, _overlayDestination);
         }
 
         rttStateSet->setAttributeAndModes(blendFunc, osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
@@ -482,11 +525,6 @@ DrapingTechnique::setUpCamera(OverlayDecorator::TechRTTParams& params)
     // TODO: we should probably lock this since other cull traversals might be accessing the group
     //       while we are changing its children.
     params._rttCamera->addChild( params._group );
-
-    // overlay geometry is rendered with no depth testing, and in the order it's found in the
-    // scene graph... until further notice.
-    rttStateSet->setMode(GL_DEPTH_TEST, 0);
-    rttStateSet->setRenderBinDetails(1, "TraversalOrderBin", osg::StateSet::OVERRIDE_PROTECTED_RENDERBIN_DETAILS );
 
     // add to the terrain stateset, i.e. the stateset that the OverlayDecorator will
     // apply to the terrain before cull-traversing it. This will activate the projective
@@ -508,19 +546,17 @@ DrapingTechnique::setUpCamera(OverlayDecorator::TechRTTParams& params)
         // fine, although I think it would be proper to clip at the fragment level with 
         // alpha. We shall see.
         const char* warpClip =
-            "#version " GLSL_VERSION_STR "\n"
-            GLSL_DEFAULT_PRECISION_FLOAT "\n"
             "void oe_overlay_warpClip(inout vec4 vclip) { \n"
             "    if (vclip.z > 1.0) vclip.z = vclip.w+1.0; \n"
             "} \n";
         VirtualProgram* rtt_vp = VirtualProgram::getOrCreate(rttStateSet);
-        rtt_vp->setName("Draping RTT");
-        rtt_vp->setFunction( "oe_overlay_warpClip", warpClip, ShaderComp::LOCATION_VERTEX_CLIP );
+        rtt_vp->setName(typeid(*this).name());
+        rtt_vp->setFunction( "oe_overlay_warpClip", warpClip, VirtualProgram::LOCATION_VERTEX_CLIP );
     }
 
     // Assemble the terrain shaders that will apply projective texturing.
     VirtualProgram* terrain_vp = VirtualProgram::getOrCreate(params._terrainStateSet);
-    terrain_vp->setName( "Draping apply");
+    terrain_vp->setName(typeid(*this).name());
 
     // sampler for projected texture:
     params._terrainStateSet->getOrCreateUniform(
@@ -532,8 +568,7 @@ DrapingTechnique::setUpCamera(OverlayDecorator::TechRTTParams& params)
 
     // shaders
     Shaders pkg;
-    pkg.load( terrain_vp, pkg.DrapingVertex );
-    pkg.load( terrain_vp, pkg.DrapingFragment );
+    pkg.load( terrain_vp, pkg.Draping );
 }
 
 
@@ -544,8 +579,9 @@ DrapingTechnique::preCullTerrain(OverlayDecorator::TechRTTParams& params,
     // allocate a texture image unit the first time through.
     if ( !_textureUnit.isSet() )
     {
-        static Threading::Mutex m;
-        m.lock();
+        static std::mutex m;
+        std::lock_guard<std::mutex> lock(m);
+
         if ( !_textureUnit.isSet() )
         {
             // apply the user-request texture unit, if applicable:
@@ -572,7 +608,6 @@ DrapingTechnique::preCullTerrain(OverlayDecorator::TechRTTParams& params,
                 }
             }
         }
-        m.unlock();
     }
 
     if ( !params._rttCamera.valid() && _textureUnit.isSet() )
@@ -588,7 +623,7 @@ DrapingTechnique::preCullTerrain(OverlayDecorator::TechRTTParams& params,
 const osg::BoundingSphere&
 DrapingTechnique::getBound(OverlayDecorator::TechRTTParams& params) const
 {
-    return _drapingManager.get(params._mainCamera).getBound();
+    return _drapingManager->get(params._mainCamera).getBound();
 }
 
 void
@@ -677,6 +712,13 @@ DrapingTechnique::setOverlayBlending( bool value )
         if ( _rttBlending )
             OE_INFO << LC << "Overlay blending " << (value?"enabled":"disabled")<< std::endl;
     }
+}
+
+void
+DrapingTechnique::setOverlayBlendingParams(GLenum src, GLenum dst)
+{
+    _overlaySource = src;
+    _overlayDestination = dst;
 }
 
 bool

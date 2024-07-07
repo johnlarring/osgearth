@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2018 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -34,15 +34,15 @@ TileSourceOptions( options )
 }
 
 void
-CompositeTileSourceOptions::add( const ImageLayerOptions& options )
+CompositeTileSourceOptions::add( const ImageLayer::Options& options )
 {
     Component c;
-    c._imageLayerOptions = options;
+    c._ImageLayerOptions = options;
     _components.push_back( c );
 }
 
 void
-CompositeTileSourceOptions::add( const ElevationLayerOptions& options )
+CompositeTileSourceOptions::add( const ElevationLayer::Options& options )
 {
     Component c;
     c._elevationLayerOptions = options;
@@ -56,8 +56,8 @@ CompositeTileSourceOptions::getConfig() const
 
     for( ComponentVector::const_iterator i = _components.begin(); i != _components.end(); ++i )
     {
-        if ( i->_imageLayerOptions.isSet() )
-            conf.add( "image", i->_imageLayerOptions->getConfig() );
+        if ( i->_ImageLayerOptions.isSet() )
+            conf.add( "image", i->_ImageLayerOptions->getConfig() );
         else if ( i->_elevationLayerOptions.isSet() )
             conf.add( "elevation", i->_elevationLayerOptions->getConfig() );
     }
@@ -78,19 +78,19 @@ CompositeTileSourceOptions::fromConfig( const Config& conf )
     const ConfigSet& images = conf.hasChild("images") ? conf.child("images").children() : conf.children("image");
     for( ConfigSet::const_iterator i = images.begin(); i != images.end(); ++i )
     {
-        add( ImageLayerOptions( *i ) );
+        add( ImageLayer::Options( *i ) );
     }
 
     const ConfigSet& elevations = conf.hasChild("elevations") ? conf.child("elevations").children() : conf.children("elevation");
     for( ConfigSet::const_iterator i = elevations.begin(); i != elevations.end(); ++i )
     {
-        add( ElevationLayerOptions( *i ) );
+        add( ElevationLayer::Options( *i ) );
     }
     
     const ConfigSet& heightfields = conf.hasChild("heightfields") ? conf.child("heightfields").children() : conf.children("heightfield");
     for( ConfigSet::const_iterator i = heightfields.begin(); i != heightfields.end(); ++i )
     {
-        add( ElevationLayerOptions( *i ) );
+        add( ElevationLayer::Options( *i ) );
     }
 
     if (conf.children("model").size() > 0 || conf.children("overlay").size() > 0 )
@@ -109,17 +109,17 @@ namespace
         {
             image = 0;
             opacity = 1;
-            dataInExtents = false;
+            mayHaveDataForKey = false;
         }
 
-        ImageInfo(osg::Image* image, float opacity, bool dataInExtents)
+        ImageInfo(osg::Image* image, float opacity, bool mayHaveDataForKey)
         {
             this->image = image;
             this->opacity = opacity;
-            this->dataInExtents = dataInExtents;
+            this->mayHaveDataForKey = mayHaveDataForKey;
         }
 
-        bool dataInExtents;
+        bool mayHaveDataForKey;
         float opacity;
         osg::ref_ptr< osg::Image> image;
     };
@@ -151,10 +151,10 @@ CompositeTileSource::createImage(const TileKey&    key,
     {
         ImageLayer* layer = itr->get();
         ImageInfo imageInfo;
-        imageInfo.dataInExtents = layer->mayHaveDataInExtent(key.getExtent());
+        imageInfo.mayHaveDataForKey = layer->mayHaveData(key);
         imageInfo.opacity = layer->getOpacity();
 
-        if (imageInfo.dataInExtents)
+        if (imageInfo.mayHaveDataForKey)
         {
             GeoImage image = layer->createImage(key, progress);
             if (image.valid())
@@ -162,7 +162,9 @@ CompositeTileSource::createImage(const TileKey&    key,
                 imageInfo.image = image.getImage();
             }
 
-            // If the progress got cancelled or it needs a retry then return NULL to prevent this tile from being built and cached with incomplete or partial data.
+            // If the progress got cancelled (due to any reason, including network error)
+            // then return NULL to prevent this tile from being built and cached with
+            // incomplete or partial data.
             if (progress && progress->isCanceled())
             {
                 OE_DEBUG << LC << " createImage was cancelled or needs retry for " << key.str() << std::endl;
@@ -196,7 +198,10 @@ CompositeTileSource::createImage(const TileKey&    key,
         {
             ImageInfo& info = images[i];
             ImageLayer* layer = _imageLayers[i].get();
-            if (!info.image.valid() && info.dataInExtents)
+
+            // If we didn't get any data for the tilekey, but the extents do overlap,
+            // we will try to fall back on lower LODs and get data there instead:
+            if (!info.image.valid() && layer->getDataExtentsUnion().intersects(key.getExtent()))
             {                      
                 TileKey parentKey = key.createParentKey();
 
@@ -329,7 +334,7 @@ CompositeTileSource::add( ImageLayer* layer )
     _imageLayers.push_back( layer );
     CompositeTileSourceOptions::Component comp;
     comp._layer = layer;
-    comp._imageLayerOptions = layer->options();
+    comp._ImageLayerOptions = layer->options();
     _options._components.push_back( comp );    
 
     return true;
@@ -372,23 +377,25 @@ CompositeTileSource::initialize(const osgDB::Options* dbOptions)
     for(CompositeTileSourceOptions::ComponentVector::iterator i = _options._components.begin();
         i != _options._components.end(); )
     {        
-        if ( i->_imageLayerOptions.isSet() && !i->_layer.valid() )
+        if ( i->_ImageLayerOptions.isSet() && !i->_layer.valid() )
         {
             // Disable the l2 cache for composite layers so that we don't get run out of memory on very large datasets.
-            i->_imageLayerOptions->driver()->L2CacheSize() = 0;
+            i->_ImageLayerOptions->driver()->L2CacheSize() = 0;
 
-            osg::ref_ptr< ImageLayer > layer = new ImageLayer(*i->_imageLayerOptions);
+            osg::ref_ptr< ImageLayer > layer = new ImageLayer(*i->_ImageLayerOptions);
             layer->setReadOptions(_dbOptions.get());
             Status status = layer->open();
             if (status.isOK())
             {
                 i->_layer = layer.get();
                 _imageLayers.push_back( layer.get() );
-                OE_INFO << LC << "Added image layer " << layer->getName() << " (" << i->_imageLayerOptions->driver()->getDriver() << ")\n";
+                OE_INFO << LC << "Added image layer " << layer->getName() << " (" << i->_ImageLayerOptions->driver()->getDriver() << ")\n";
             }
             else
             {
-                OE_DEBUG << LC << "Could not open image layer (" << layer->getName() << ") ... " << status.message() << std::endl;
+                setStatus(Status(Status::ResourceUnavailable, Stringify()
+                    << "Could not open sublayer (" << layer->getName() << ") ... " << status.message()));
+                return getStatus();
             }            
         }
         else if (i->_elevationLayerOptions.isSet() && !i->_layer.valid())
@@ -407,7 +414,9 @@ CompositeTileSource::initialize(const osgDB::Options* dbOptions)
             }
             else
             {
-                OE_WARN << LC << "Could not open elevation layer (" << layer->getName() << ") ... " << status.message() << std::endl;
+                setStatus(Status(Status::ResourceUnavailable, Stringify()
+                    << "Could not open sublayer (" << layer->getName() << ") ... " << status.message()));
+                return getStatus();
             }
         }
 

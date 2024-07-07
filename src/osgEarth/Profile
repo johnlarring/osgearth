@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -32,6 +32,7 @@ namespace osgEarth
 
     /**
      * Configuration options for initializing a Profile.
+     * TODO: refactor into Profile::Options
      */
     class OSGEARTH_EXPORT ProfileOptions : public ConfigOptions
     {
@@ -101,14 +102,11 @@ namespace osgEarth
     class OSGEARTH_EXPORT Profile : public osg::Referenced
     {
     public:
-        // profile types:
-        enum ProfileType
-        {
-            TYPE_UNKNOWN,
-            TYPE_GEODETIC,
-            TYPE_MERCATOR,
-            TYPE_LOCAL
-        };
+        // well knowns
+        static std::string GLOBAL_GEODETIC;
+        static std::string GLOBAL_MERCATOR;
+        static std::string SPHERICAL_MERCATOR;
+        static std::string PLATE_CARREE;
 
     public:
 
@@ -133,16 +131,30 @@ namespace osgEarth
             unsigned int numTilesHighAtLod0 =0 );
 
         static const Profile* create(
+            const std::string& wellKnownName,
+            const SpatialReference* srs,
+            double xmin, double ymin, double xmax, double ymax,
+            unsigned int numTilesWideAtLod0 = 0,
+            unsigned int numTilesHighAtLod0 = 0);
+
+        static const Profile* create(
+            const SpatialReference* srs);
+
+        static const Profile* create(
             const std::string& srs_string,
-            const std::string& vsrs_string ="",
+            const std::string& vsrs_string,
             unsigned int numTilesWideAtLod0 =0,
             unsigned int numTilesHighAtLod0 =0 );
 
         static const Profile* create(
             const ProfileOptions& options );
 
-        static const Profile* createNamed(
+        static const Profile* create(
             const std::string& name);
+
+        static const Profile* create_with_vdatum(
+            const std::string& name,
+            const std::string& vsrsString);
 
         /**
          * Returns true if the profile is properly initialized.
@@ -165,11 +177,6 @@ namespace osgEarth
         const SpatialReference* getSRS() const;
 
         /**
-         * Gets the profile type
-         */
-        ProfileType getProfileType() const;  
-
-        /**
          * Given an x-resolution, specified in the profile's SRS units, calculates and
          * returns the closest LOD level.
          */
@@ -189,12 +196,7 @@ namespace osgEarth
         /** 
          * Calculates an extent given a tile location in this profile.
          */
-        virtual GeoExtent calculateExtent( unsigned int lod, unsigned int tileX, unsigned int tileY );
-
-        /**
-         * Deduces a profile type given an SRS string.
-         */
-        static ProfileType getProfileTypeFromSRS(const std::string &srs);
+        virtual GeoExtent calculateExtent(unsigned int lod, unsigned int tileX, unsigned int tileY) const;
 
         /**
          * Gets whether the two profiles can be treated as equivalent.
@@ -251,6 +253,12 @@ namespace osgEarth
          */
         TileKey createTileKey( double x, double y, unsigned int level ) const;
 
+        //! Creates a tile key for a tile that contains the input location.
+        //! @param point Point at which to create the tile key
+        //! @param lod LOD at which to create the tile key
+        //! @return tile key containing the point
+        TileKey createTileKey(const GeoPoint& point, unsigned level) const;
+
         /**
          * Returns a readable description of the profile.
          */
@@ -278,6 +286,15 @@ namespace osgEarth
          * the LOD in this Profile that is nearly equivalent.
          */
         virtual unsigned getEquivalentLOD(const Profile* profile, unsigned lod) const;
+
+        /**
+         * Given a LOD-0 tile height, determine the LOD in this Profile that
+         * most closely houses a tile with that height.
+         */
+        virtual unsigned getLOD(double tileHeight) const;
+
+        //! Get the hash code for this profile
+        std::size_t hash() const { return _hash; }
 
     public:
 
@@ -313,12 +330,23 @@ namespace osgEarth
 
     private:
 
+        std::string _wellKnownName;
         GeoExtent   _extent;
         GeoExtent   _latlong_extent;
         unsigned    _numTilesWideAtLod0;
         unsigned    _numTilesHighAtLod0;
         std::string _fullSignature;
         std::string _horizSignature;
+        std::size_t _hash;
+    };
+}
+
+namespace std {
+    // std::hash specialization for Profile
+    template<> struct hash<osgEarth::Profile> {
+        inline size_t operator()(const osgEarth::Profile& value) const {
+            return value.hash();
+        }
     };
 }
 

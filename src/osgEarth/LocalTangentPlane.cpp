@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -25,31 +25,28 @@ using namespace osgEarth;
 
 // --------------------------------------------------------------------------
 
-TangentPlaneSpatialReference::TangentPlaneSpatialReference( void* handle, const osg::Vec3d& originLLA ) :
-SpatialReference( handle, false ),
-_originLLA      ( originLLA )
-{
-    //nop
-}
+TangentPlaneSpatialReference::TangentPlaneSpatialReference(
+    const Key& key,
+    const osg::Vec3d& originLLA) :
 
-void
-TangentPlaneSpatialReference::_init()
+    SpatialReference(key),
+    _originLLA(originLLA)
 {
-    SpatialReference::_init();
-
     _is_user_defined = true;
-    _is_contiguous   = true;
-    _is_ltp          = true;
-    _is_geographic   = false;
-    _name            = "ENU Local Tangent Plane";
+    _is_ltp = true;
+    _domain = PROJECTED;
+    _name = "Tangent Plane";
 
     // set up the LTP matrixes.
 
-    getEllipsoid()->computeLocalToWorldTransformFromLatLongHeight(
-        osg::DegreesToRadians(_originLLA.y()),
-        osg::DegreesToRadians(_originLLA.x()),
-        _originLLA.z(),
-        _local2world);
+    osg::Vec3d xyz = getEllipsoid().geodeticToGeocentric(_originLLA);
+    _local2world = getEllipsoid().geocentricToLocalToWorld(xyz);
+
+    //getEllipsoid()->computeLocalToWorldTransformFromLatLongHeight(
+    //    osg::DegreesToRadians(_originLLA.y()),
+    //    osg::DegreesToRadians(_originLLA.x()),
+    //    _originLLA.z(),
+    //    _local2world);
 
     _world2local.invert( _local2world );
 }
@@ -60,11 +57,12 @@ TangentPlaneSpatialReference::preTransform(std::vector<osg::Vec3d>& points) cons
     for(std::vector<osg::Vec3d>::iterator i = points.begin(); i != points.end(); ++i)
     {
         osg::Vec3d world = (*i) * _local2world;
-        double lat, lon, height;
-        getEllipsoid()->convertXYZToLatLongHeight(world.x(), world.y(), world.z(), lat, lon, height);
-        i->x() = osg::RadiansToDegrees(lon);
-        i->y() = osg::RadiansToDegrees(lat);
-        i->z() = height;
+        //double lat, lon, height;
+        i->set(getEllipsoid().geocentricToGeodetic(world));
+        //getEllipsoid()->convertXYZToLatLongHeight(world.x(), world.y(), world.z(), lat, lon, height);
+        //i->x() = osg::RadiansToDegrees(lon);
+        //i->y() = osg::RadiansToDegrees(lat);
+        //i->z() = height;
     }
     return getGeodeticSRS();
 }
@@ -75,16 +73,17 @@ TangentPlaneSpatialReference::postTransform(std::vector<osg::Vec3d>& points) con
     osg::Vec3d world;
     for(std::vector<osg::Vec3d>::iterator i = points.begin(); i != points.end(); ++i)
     {
-        getEllipsoid()->convertLatLongHeightToXYZ(
-            osg::DegreesToRadians(i->y()), osg::DegreesToRadians(i->x()), i->z(),
-            world.x(), world.y(), world.z() );
+        world = getEllipsoid().geodeticToGeocentric(*i);
+        //getEllipsoid()->convertLatLongHeightToXYZ(
+        //    osg::DegreesToRadians(i->y()), osg::DegreesToRadians(i->x()), i->z(),
+        //    world.x(), world.y(), world.z() );
         i->set( world * _world2local );
     }
     return getGeodeticSRS();
 }
 
 bool
-TangentPlaneSpatialReference::_isEquivalentTo( const SpatialReference* srs ) const
+TangentPlaneSpatialReference::_isEquivalentTo( const SpatialReference* srs, bool considerVDatum ) const
 {
     return 
         srs->isLTP() && 

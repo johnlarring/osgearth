@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -97,7 +97,7 @@ namespace osgEarth
         const std::string& getName() const { return _name; }
 
         /** Gets the linear units of height values */
-        const Units& getUnits() const { return _units; }
+        const UnitsType& getUnits() const { return _units; }
 
         /** Gets the string that was used to initialize this SRS */
         const std::string& getInitString() const { return _initString; }
@@ -117,7 +117,7 @@ namespace osgEarth
             Geoid*             geoid =0L );
 
         /** Creates a simple ellipsoidal VSRS. */
-        VerticalDatum( const Units& units );
+        VerticalDatum( const UnitsType& units );
 
         /** dtor */
         virtual ~VerticalDatum() { }
@@ -130,20 +130,22 @@ namespace osgEarth
         std::string         _name;
         std::string         _initString;
         osg::ref_ptr<Geoid> _geoid;
-        Units               _units;
+        UnitsType           _units;
     };
 
     //--------------------------------------------------------------------
 
-    /**
-     * Creates a geoid instance based on an initialization string.
-     */
-    class OSGEARTH_EXPORT VerticalDatumFactory
-    {   
-	public:
-        static VerticalDatum* create( const std::string& id );
-    };
-
+    namespace Util
+    {
+        /**
+         * Creates a geoid instance based on an initialization string.
+         */
+        class OSGEARTH_EXPORT VerticalDatumFactory
+        {   
+	    public:
+            static VerticalDatum* create( const std::string& id );
+        };
+    }
 }
 
 #endif // OSGEARTH_VERTICAL_DATUM_H

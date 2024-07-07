@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -20,22 +20,29 @@
 * along with this program.  If not, see <http://www.gnu.org/licenses/>
 */
 #include <osgEarth/MapNode>
+#include <osgEarth/CascadeDrapingDecorator>
 #include <osgEarth/ClampingTechnique>
 #include <osgEarth/CullingUtils>
 #include <osgEarth/DrapingTechnique>
 #include <osgEarth/NodeUtils>
 #include <osgEarth/Registry>
-#include <osgEarth/ResourceReleaser>
 #include <osgEarth/Lighting>
 #include <osgEarth/GLUtils>
 #include <osgEarth/HorizonClipPlane>
+#include <osgEarth/SceneGraphCallback>
+#include <osgEarth/MapNodeObserver>
+#include <osgEarth/Utils>
+#include <osgEarth/Shaders>
+#include <osgEarth/Chonk>
 #include <osgUtil/Optimizer>
+#include <osgDB/DatabasePager>
+#include <osgEarth/HTTPClient>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
+using namespace osgEarth::Contrib;
 
 #define LC "[MapNode] "
-
-//---------------------------------------------------------------------------
 
 namespace
 {
@@ -58,10 +65,10 @@ namespace
         void onLayerMoved(Layer* layer, unsigned oldIndex, unsigned newIndex) {
             _node->onLayerMoved(layer, oldIndex, newIndex);
         }
-        void onLayerEnabled(Layer* layer) {
+        void onLayerOpened(Layer* layer) {
             _node->onLayerAdded(layer, _node->getMap()->getIndexOfLayer(layer));
         }
-        void onLayerDisabled(Layer* layer) {
+        void onLayerClosed(Layer* layer) {
             _node->onLayerRemoved(layer, _node->getMap()->getIndexOfLayer(layer));
         }
 
@@ -86,41 +93,59 @@ namespace
         osg::observer_ptr<MapNode> _mapNode;
     };
 
+    // proxy cull callback for layers that have their own cull callback
+    struct LayerCullCallbackDispatch : public osg::NodeCallback
+    {
+        Layer* _layer;
+
+        LayerCullCallbackDispatch(Layer* layer) : _layer(layer) { }
+
+        virtual void operator()(osg::Node* node, osg::NodeVisitor* nv)
+        {
+            if (_layer->getNode())
+            {
+                _layer->apply(_layer->getNode(), nv);
+            }
+            else
+            {
+                traverse(node, nv);
+            }
+        };
+    };
+
     typedef std::vector< osg::ref_ptr<Extension> > Extensions;
-}
 
-//---------------------------------------------------------------------------
-
-class RemoveBlacklistedFilenamesVisitor : public osg::NodeVisitor
-{
-public:
-    RemoveBlacklistedFilenamesVisitor():
-      osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ALL_CHILDREN),
-          _numRemoved(0)
-      {
-      }
-
-      virtual void apply(osg::PagedLOD& node)
-      {
-          //The PagedLOD node will contain two filenames, the first is empty and is the actual geometry of the
-          //tile and the second is the filename of the next tile.
-          if (node.getNumFileNames() > 1)
+    class RemoveBlacklistedFilenamesVisitor : public osg::NodeVisitor
+    {
+    public:
+        RemoveBlacklistedFilenamesVisitor():
+          osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ALL_CHILDREN),
+              _numRemoved(0)
           {
-              //Get the child filename
-              const std::string &filename = node.getFileName(1);
-              if (osgEarth::Registry::instance()->isBlacklisted(filename))
-              {
-                  //If the tile is blacklisted, we set the actual geometry, child 0, to always display
-                  //and the second child to never display
-                  node.setRange(0, 0, FLT_MAX);
-                  node.setRange(1, FLT_MAX, FLT_MAX);
-              }
           }
-          traverse(node);
-      }
 
-      unsigned int _numRemoved;
-};
+          virtual void apply(osg::PagedLOD& node)
+          {
+              //The PagedLOD node will contain two filenames, the first is empty and is the actual geometry of the
+              //tile and the second is the filename of the next tile.
+              if (node.getNumFileNames() > 1)
+              {
+                  //Get the child filename
+                  const std::string &filename = node.getFileName(1);
+                  if (osgEarth::Registry::instance()->isBlacklisted(filename))
+                  {
+                      //If the tile is blacklisted, we set the actual geometry, child 0, to always display
+                      //and the second child to never display
+                      node.setRange(0, 0, FLT_MAX);
+                      node.setRange(1, FLT_MAX, FLT_MAX);
+                  }
+              }
+              traverse(node);
+          }
+
+          unsigned int _numRemoved;
+    };
+}
 
 //---------------------------------------------------------------------------
 
@@ -129,7 +154,7 @@ MapNode::load(osg::ArgumentParser& args)
 {
     for( int i=1; i<args.argc(); ++i )
     {
-        if ( args[i] && endsWith(args[i], ".earth") )
+        if ( args[i] ) //&& (endsWith(args[i], ".earth") || endsWith(args[i], ".earth.template")) )
         {
             ReadResult r = URI(args[i]).readNode();
             if ( r.succeeded() )
@@ -142,11 +167,11 @@ MapNode::load(osg::ArgumentParser& args)
 }
 
 MapNode*
-MapNode::load(osg::ArgumentParser& args, const MapNodeOptions& defaults)
+MapNode::load(osg::ArgumentParser& args, const MapNode::Options& defaults)
 {
     for( int i=1; i<args.argc(); ++i )
     {
-        if ( args[i] && endsWith(args[i], ".earth") )
+        if ( args[i] ) //&& (endsWith(args[i], ".earth") || endsWith(args[i], ".earth.template")))
         {
             osg::ref_ptr<osgDB::Options> dbo = new osgDB::Options();
             std::string optionsJSON = defaults.getConfig().toJSON();
@@ -161,66 +186,79 @@ MapNode::load(osg::ArgumentParser& args, const MapNodeOptions& defaults)
     return 0L;
 }
 
-//---------------------------------------------------------------------------
+//....................................................................
+
+Config
+MapNode::Options::getConfig() const
+{
+    Config conf("options");
+    conf.set( "proxy",                    proxySettings() );
+    conf.set( "lighting",                 enableLighting() );
+    conf.set( "overlay_blending",         overlayBlending() );
+    conf.set( "overlay_blending_source",  overlayBlendingSource());
+    conf.set( "overlay_texture_size",     overlayTextureSize() );
+    conf.set( "overlay_mipmapping",       overlayMipMapping() );
+    conf.set( "overlay_resolution_ratio", overlayResolutionRatio() );
+    conf.set( "cascade_draping",          useCascadeDraping() );
+    conf.set( "draping_render_bin_number",drapingRenderBinNumber() );
+    conf.set("screen_space_error", screenSpaceError());
+
+    if (terrain().isSet() && !terrain()->empty())
+        conf.set( "terrain", terrain()->getConfig() );
+
+    return conf;
+}
+
+void
+MapNode::Options::fromConfig(const Config& conf)
+{
+    conf.get( "proxy",                    proxySettings() );
+    conf.get( "lighting",                 enableLighting() );
+    conf.get( "overlay_blending",         overlayBlending() );
+    conf.get( "overlay_blending_source",  overlayBlendingSource());
+    conf.get( "overlay_texture_size",     overlayTextureSize() );
+    conf.get( "overlay_mipmapping",       overlayMipMapping() );
+    conf.get( "overlay_resolution_ratio", overlayResolutionRatio() );
+    conf.get( "cascade_draping",          useCascadeDraping() );
+    conf.get( "draping_render_bin_number",drapingRenderBinNumber() );
+    conf.get("screen_space_error", screenSpaceError());
+
+    if ( conf.hasChild( "terrain" ) )
+        terrain() = TerrainOptions( conf.child("terrain") );
+}
+
+//....................................................................
 
 MapNode::MapNode() :
-_map( new Map() ),
-_layerNodes(0L),
-_terrainEngine(0L)
+_map( new Map() )
 {
     init();
 }
 
 MapNode::MapNode( Map* map ) :
-_map( map ),
-_layerNodes(0L),
-_terrainEngine(0L)
+_map( map ? map : new Map() )
 {
     init();
 }
 
-MapNode::MapNode( const MapNodeOptions& options ) :
+MapNode::MapNode(const MapNode::Options& options ) :
 _map( new Map() ),
-_mapNodeOptions( options ),
-_layerNodes(0L),
-_terrainEngine(0L)
+_optionsConcrete(options)
 {
     init();
 }
 
-MapNode::MapNode( Map* map, const MapNodeOptions& options ) :
+MapNode::MapNode(Map* map, const MapNode::Options& options) :
 _map( map? map : new Map() ),
-_mapNodeOptions( options ),
-_layerNodes(0L),
-_terrainEngine(0L)
+_optionsConcrete(options)
 {
     init();
 }
 
-MapNode::MapNode( Map* map, const MapNodeOptions& options, bool autoInit ) :
-_map( map? map : new Map() ),
-_mapNodeOptions( options ),
-_layerNodes(0L),
-_terrainEngine(0L)
-{
-    if ( autoInit )
-    {
-        init();
-    }
-}
-
-
+// Common CTOR method
 void
 MapNode::init()
 {
-    // Take a reference to this object so that it doesn't get inadvertently
-    // deleting during startup. It is possible that during startup, a driver
-    // will load that will take a reference to the MapNode (like in a
-    // ModelSource node operation) and we don't want that deleting the MapNode
-    // out from under us.
-    // This is paired by an unref_nodelete() at the end of this method.
-    this->ref();
-
     // Protect the MapNode from the Optimizer
     setDataVariance(osg::Object::DYNAMIC);
 
@@ -228,134 +266,162 @@ MapNode::init()
     ShaderGenerator::setIgnoreHint(this, true);
 
     // initialize 0Ls
-    _terrainEngine          = 0L;
-    _terrainEngineContainer = 0L;
-    _overlayDecorator       = 0L;
+    _terrainEngine = 0L;
+    _terrainGroup = 0L;
+    _layerNodes = 0L;
+    _lastNumBlacklistedFilenames = 0;
+    _isOpen = false;
 
     setName( "osgEarth::MapNode" );
 
-    _maskLayerNode = 0L;
-    _lastNumBlacklistedFilenames = 0;
+    // Construct the container for the terrain engine, which also hold the options.
+    _terrainGroup = new StickyGroup();
+    this->addChild(_terrainGroup);
+
+    // make a group for the model layers.  This node is a PagingManager instead of a regular Group to allow PagedNode's to be used within the layers.
+    auto pagingManager = new PagingManager();
+    pagingManager->setName("osgEarth::MapNode.layerNodes");
+    pagingManager->setMaxMergesPerFrame(options().terrain()->mergesPerFrame().value());
+    _layerNodes = pagingManager;
+
+    this->addChild( _layerNodes );
+
+    // Make sure the Registry is not destroyed until we are done using
+    // it (in ~MapNode).
+    //_registry = Registry::instance();
+
+    // the default SSE for all supporting geometries
+    _sseU = new osg::Uniform("oe_sse", options().screenSpaceError().get());
+
+    _readyForUpdate = true;
+}
+
+bool
+MapNode::open()
+{
+    if (_isOpen)
+        return _isOpen;
+
+    _isOpen = true;
+
+    // Take a reference to this object so that it doesn't get inadvertently
+    // deleting during startup. It is possible that during startup, a driver
+    // will load that will take a reference to the MapNode and we don't want
+    // that deleting the MapNode out from under us.
+    // This is paired by an unref_nodelete() at the end of this method.
+    this->ref();
 
     // Set the global proxy settings
     // TODO: this should probably happen elsewhere, like in the registry?
-    if ( _mapNodeOptions.proxySettings().isSet() )
+    if ( options().proxySettings().isSet() )
     {
-        HTTPClient::setProxySettings( _mapNodeOptions.proxySettings().get() );
+        HTTPClient::setProxySettings( options().proxySettings().get() );
     }
 
-    // establish global driver options. These are OSG reader-writer options that
-    // will make their way to any read* calls down the pipe
-    const osgDB::Options* global_options = _map->getGlobalOptions();
+    // Install a callback that lets this MapNode know about any changes
+    // to the map, and invoke it manually now so they start out in sync.
+    _mapCallback = new MapNodeMapCallbackProxy(this);
+    _map->addMapCallback( _mapCallback.get() );
+    _mapCallback->invokeOnLayerAdded(_map.get());
 
-    osg::ref_ptr<osgDB::Options> local_options = global_options ?
-        Registry::instance()->cloneOrCreateOptions( global_options ) :
-        NULL;
-
-    if ( local_options.valid() )
-    {
-        OE_INFO << LC
-            << "Options string = "
-            << (local_options.valid()? local_options->getOptionString() : "<empty>")
-            << std::endl;
-    }
-
-    // Create and install a GL resource releaser that this node and extensions can use.
-    _resourceReleaser = new ResourceReleaser();
-    this->addChild(_resourceReleaser);
-
-    // TODO: not sure why we call this here
-    _map->setGlobalOptions( local_options.get() );
-
-    // load and attach the terrain engine, but don't initialize it until we need it
-    const TerrainOptions& terrainOptions = _mapNodeOptions.getTerrainOptions();
-
-    _terrainEngine = TerrainEngineNodeFactory::create( terrainOptions );
-    _terrainEngineInitialized = false;
-
+    // load and attach the terrain engine.
+    _terrainEngine = TerrainEngineNode::create(options().terrain().get());
     if ( _terrainEngine )
     {
-        _terrainEngine->setMap( _map.get(), terrainOptions );
+        _terrainEngine->setMap(_map.get(), options().terrain().get());
     }
     else
     {
         OE_WARN << "FAILED to create a terrain engine for this map" << std::endl;
     }
 
-    // the engine needs a container so we can set lighting state on the container and
-    // not on the terrain engine itself. Makeing it a StickyGroup prevents the osgUtil
-    // Optimizer from collapsing it if it's empty
-    _terrainEngineContainer = new StickyGroup();
-    _terrainEngineContainer->setDataVariance( osg::Object::DYNAMIC );
-    this->addChild( _terrainEngineContainer );
+    // now that the terrain engine exists, we can invoke the rendering callback
+    LayerVector layers;
+    _map->getLayers(layers, [&](const Layer* layer) { return layer->isOpen(); });
+    for (auto& layer : layers)
+        layer->invoke_prepareForRendering(getTerrainEngine());
 
     // initialize terrain-level lighting:
-    if ( terrainOptions.enableLighting().isSet() )
+    if ( options().terrain()->enableLighting().isSet() )
     {
         GLUtils::setLighting(
-            _terrainEngineContainer->getOrCreateStateSet(),
-            terrainOptions.enableLighting().value() ? 1 : 0 );
+            _terrainGroup->getOrCreateStateSet(),
+            options().terrain()->enableLighting().get() ? 1 : 0 );
     }
 
-    // a decorator for overlay models:
-    _overlayDecorator = new OverlayDecorator();
-    _terrainEngineContainer->addChild(_overlayDecorator);
+    if (_terrainEngine.valid())
+    {
+        // a decorator for draped geometry (projected texturing)
+        OverlayDecorator* overlayDecorator = new OverlayDecorator();
+        _terrainGroup->addChild(overlayDecorator);
 
-    // install the Draping technique for overlays:
-    DrapingTechnique* draping = new DrapingTechnique();
+        // install the Clamping technique for overlays:
+        ClampingTechnique* clamping = new ClampingTechnique();
+        overlayDecorator->addTechnique(clamping);
+        _clampingManager = &clamping->getClampingManager();
 
-    const char* envOverlayTextureSize = ::getenv("OSGEARTH_OVERLAY_TEXTURE_SIZE");
+        bool envUseCascadedDraping = (::getenv("OSGEARTH_USE_CASCADE_DRAPING") != 0L);
+        if (envUseCascadedDraping || options().useCascadeDraping() == true)
+        {
+            CascadeDrapingDecorator* cascadeDrapingDecorator = new CascadeDrapingDecorator(getMapSRS(), _terrainEngine->getResources());
+            overlayDecorator->addChild(cascadeDrapingDecorator);
+            _drapingManager = cascadeDrapingDecorator->getDrapingManager();
+            cascadeDrapingDecorator->addChild(_terrainEngine);
+        }
 
-    if ( _mapNodeOptions.overlayBlending().isSet() )
-        draping->setOverlayBlending( *_mapNodeOptions.overlayBlending() );
-    if ( envOverlayTextureSize )
-        draping->setTextureSize( as<int>(envOverlayTextureSize, 1024) );
-    else if ( _mapNodeOptions.overlayTextureSize().isSet() )
-        draping->setTextureSize( *_mapNodeOptions.overlayTextureSize() );
-    if ( _mapNodeOptions.overlayMipMapping().isSet() )
-        draping->setMipMapping( *_mapNodeOptions.overlayMipMapping() );
-    if ( _mapNodeOptions.overlayAttachStencil().isSet() )
-        draping->setAttachStencil( *_mapNodeOptions.overlayAttachStencil() );
-    if ( _mapNodeOptions.overlayResolutionRatio().isSet() )
-        draping->setResolutionRatio( *_mapNodeOptions.overlayResolutionRatio() );
+        else
+        {
+            // simple draping - faster but less accurate
 
-    draping->reestablish( _terrainEngine );
-    _overlayDecorator->addTechnique( draping );
-    _drapingManager = &draping->getDrapingManager();
+            DrapingTechnique* draping = new DrapingTechnique();
 
-    // install the Clamping technique for overlays:
-    ClampingTechnique* clamping = new ClampingTechnique();
-    _overlayDecorator->addTechnique(clamping);
-    _clampingManager = &clamping->getClampingManager();
+            const char* envOverlayTextureSize = ::getenv("OSGEARTH_OVERLAY_TEXTURE_SIZE");
 
-    _overlayDecorator->setTerrainEngine(_terrainEngine);
-    _overlayDecorator->addChild(_terrainEngine);
+            if (options().overlayBlending().isSet())
+                draping->setOverlayBlending(options().overlayBlending().get());
 
-    // make a group for the model layers. (Sticky otherwise the osg optimizer will remove it)
-    _layerNodes = new StickyGroup();
-    _layerNodes->setName( "osgEarth::MapNode.layerNodes" );
-    this->addChild( _layerNodes );
+            if (options().overlayBlendingSource().isSetTo("color"))
+                draping->setOverlayBlendingParams(GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR);
+            else if (options().overlayBlendingSource().isSetTo("alpha"))
+                draping->setOverlayBlendingParams(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    // Callback listens for changes in the Map:
-    _mapCallback = new MapNodeMapCallbackProxy(this);
-    _map->addMapCallback( _mapCallback.get() );
+            if (envOverlayTextureSize)
+                draping->setTextureSize(as<int>(envOverlayTextureSize, 1024));
 
-    // Simulate adding all existing layers:
-    _mapCallback->invokeOnLayerAdded(_map.get());
+            else if (options().overlayTextureSize().isSet())
+                draping->setTextureSize(options().overlayTextureSize().get());
 
+            if (options().overlayMipMapping().isSet())
+                draping->setMipMapping(options().overlayMipMapping().get());
+
+            if (options().overlayResolutionRatio().isSet())
+                draping->setResolutionRatio(options().overlayResolutionRatio().get());
+
+            draping->reestablish(_terrainEngine);
+            overlayDecorator->addTechnique(draping);
+            _drapingManager = draping->getDrapingManager();
+
+            if (options().drapingRenderBinNumber().isSet())
+                _drapingManager->setRenderBinNumber(options().drapingRenderBinNumber().get());
+
+            overlayDecorator->addChild(_terrainEngine);
+        }
+
+        overlayDecorator->setTerrainEngine(_terrainEngine);
+    }
 
     osg::StateSet* stateset = getOrCreateStateSet();
     stateset->setName("MapNode");
 
-    if ( _mapNodeOptions.enableLighting().isSet() )
+    stateset->addUniform(_sseU.get());
+
+    if ( options().enableLighting().isSet() )
     {
-        GLUtils::setLighting(
-            stateset,
-            _mapNodeOptions.enableLighting().value() ? 1 : 0);
+        setEnableLighting(options().enableLighting().get());
     }
 
-    // Add in some global uniforms
-    if ( _map->isGeocentric() )
+    // A shader define indicating that this is a geocentric display
+    if ( _map->getSRS()->isGeographic() )
     {
         stateset->setDefine("OE_IS_GEOCENTRIC");
     }
@@ -367,10 +433,21 @@ MapNode::init()
     stateset->setAttributeAndModes(defaultMaterial, 1);
     MaterialCallback().operator()(defaultMaterial, 0L);
 
+    // activate PBR support.
+    VirtualProgram* vp = VirtualProgram::getOrCreate(stateset);
+    vp->setName(className());
+    Shaders shaders;
+
+    shaders.load(vp, shaders.PBR);
+    stateset->setDefine("OE_USE_PBR");
+
+    shaders.load(vp, shaders.HexTilingLib);
+    stateset->setDefine("OE_HAVE_HEX_TILING");
+
     dirtyBound();
 
     // install a callback that sets the viewport size uniform:
-    this->addCullCallback(new InstallViewportSizeUniform());
+    this->addCullCallback(new InstallCameraUniform());
 
     // install a callback that updates a horizon object and installs a clipping plane
     if (getMapSRS()->isGeographic())
@@ -378,20 +455,40 @@ MapNode::init()
         this->addCullCallback(new HorizonClipPlane(getMapSRS()->getEllipsoid()));
     }
 
+    // connect any extensions that have already been added.
+    for(Extensions::iterator i = _extensions.begin(); i != _extensions.end(); ++i)
+    {
+        ExtensionInterface<MapNode>* extensionIF = ExtensionInterface<MapNode>::get(i->get());
+        if (extensionIF)
+        {
+            extensionIF->connect(this);
+        }
+    }
+
     // register for event traversals so we can deal with blacklisted filenames
     ADJUST_EVENT_TRAV_COUNT( this, 1 );
 
     // remove the temporary reference.
     this->unref_nodelete();
+
+    return true;
 }
 
 MapNode::~MapNode()
 {
-    // Remove this node's map callback first:
-    _map->removeMapCallback( _mapCallback.get() );
+    releaseGLObjects(nullptr);
 
-    // Then invoke "removed" on all the layers in a batch.
-    _mapCallback->invokeOnLayerRemoved(_map.get());
+    if (_terrainEngine)
+        _terrainEngine->shutdown();
+
+    if (_mapCallback.valid())
+    {
+        // Remove this node's map callback first:
+        _map->removeMapCallback( _mapCallback.get() );
+
+        // Then invoke "removed" on all the layers in a batch.
+        _mapCallback->invokeOnLayerRemoved(_map.get());
+    }
 
     this->clearExtensions();
 
@@ -402,25 +499,42 @@ MapNode::~MapNode()
         << (te.valid()? te.get()->referenceCount() : 0) << ", Map=" << _map->referenceCount() << ")\n";
 }
 
+void
+MapNode::setEnableLighting(const bool& value)
+{
+    options().enableLighting() = value;
+    
+    GLUtils::setLighting(
+        getOrCreateStateSet(),
+        options().enableLighting().value() ? 1 : 0);
+}
+
+const bool&
+MapNode::getEnableLighting() const
+{
+    return options().enableLighting().get();
+}
+
 Config
 MapNode::getConfig() const
 {
     Config mapConf("map");
-    mapConf.set("version", "2");
+    mapConf.set("version", "3");
 
     // the map and node options:
-    Config optionsConf = _map->getInitialMapOptions().getConfig();
-    optionsConf.merge( getMapNodeOptions().getConfig() );
-    mapConf.add( "options", optionsConf );
+    const Map* cmap = _map.get();
+    Config optionsConf = cmap->options().getConfig();
+    optionsConf.merge( options().getConfig() );
+    if (!optionsConf.empty())
+    {
+        mapConf.add("options", optionsConf);
+    }
 
     // the layers
     LayerVector layers;
     _map->getLayers(layers);
-
-    for (LayerVector::const_iterator i = layers.begin(); i != layers.end(); ++i)
+    for(auto& layer : layers)
     {
-        const Layer* layer = i->get();
-
         Config layerConf = layer->getConfig();
         if (!layerConf.empty() && !layerConf.key().empty())
         {
@@ -453,7 +567,7 @@ MapNode::computeBound() const
     osg::BoundingSphere bs;
     if ( getTerrainEngine() )
     {
-        bs.expandBy( getTerrainEngine()->getBound() );
+        bs.expandBy( getTerrainEngine()->getNode()->getBound() );
     }
 
     if (_layerNodes)
@@ -479,7 +593,18 @@ MapNode::getMap() const
 const SpatialReference*
 MapNode::getMapSRS() const
 {
-    return getMap()->getProfile()->getSRS();
+    return getMap() && getMap()->getProfile() ?
+        getMap()->getProfile()->getSRS() :
+        0L;
+}
+
+TerrainOptionsAPI
+MapNode::getTerrainOptions()
+{
+    if (_terrainEngine.valid())
+        return _terrainEngine->getOptions();
+    else
+        return TerrainOptionsAPI(&_optionsConcrete.terrain().mutable_value());
 }
 
 Terrain*
@@ -493,19 +618,34 @@ MapNode::getTerrain()
 const Terrain*
 MapNode::getTerrain() const
 {
+    if (getTerrainEngine() == NULL)
+        return NULL;
     return getTerrainEngine()->getTerrain();
 }
 
-TerrainEngineNode*
+TerrainEngine*
 MapNode::getTerrainEngine() const
 {
     return _terrainEngine;
 }
 
-ResourceReleaser*
-MapNode::getResourceReleaser() const
+void
+MapNode::setScreenSpaceError(float value)
 {
-    return _resourceReleaser;
+    // global option:
+    options().screenSpaceError() = value;
+
+    // update the corresponding terrain option:
+    getTerrainOptions().setScreenSpaceError(value);
+
+    // update the uniform:
+    _sseU->set(value);
+}
+
+float
+MapNode::getScreenSpaceError() const
+{
+    return options().screenSpaceError().get();
 }
 
 void
@@ -522,14 +662,17 @@ MapNode::addExtension(Extension* extension, const osgDB::Options* options)
         else if ( getMap()->getReadOptions() )
             extension->setDBOptions( getMap()->getReadOptions() );
 
-        // start it.
-        ExtensionInterface<MapNode>* extensionIF = ExtensionInterface<MapNode>::get(extension);
-        if ( extensionIF )
+        // start it if the map is open; otherwise this will happen during MapNode::open.
+        if (_isOpen)
         {
-            extensionIF->connect( this );
+            ExtensionInterface<MapNode>* extensionIF = ExtensionInterface<MapNode>::get(extension);
+            if ( extensionIF )
+            {
+                extensionIF->connect( this );
+            }
         }
 
-        OE_INFO << LC << "Added extension \"" << extension->getName() << "\"\n";
+        //OE_INFO << LC << "Added extension \"" << extension->getName() << "\"\n";
     }
 }
 
@@ -569,19 +712,6 @@ MapNode::getLayerNodeGroup() const
     return _layerNodes;
 }
 
-osg::Node*
-MapNode::getLayerNode(Layer* layer) const
-{
-    return layer ? layer->getNode() : 0L;
-}
-
-
-const MapNodeOptions&
-MapNode::getMapNodeOptions() const
-{
-    return _mapNodeOptions;
-}
-
 MapNode*
 MapNode::findMapNode( osg::Node* graph, unsigned travmask )
 {
@@ -591,7 +721,7 @@ MapNode::findMapNode( osg::Node* graph, unsigned travmask )
 bool
 MapNode::isGeocentric() const
 {
-    return _map->isGeocentric();
+    return _map->getSRS()? _map->getSRS()->isGeographic() : true;
 }
 
 namespace
@@ -605,7 +735,8 @@ namespace
         for (LayerVector::iterator i = layers.begin(); i != layers.end(); ++i)
         {
             Layer* layer = i->get();
-            if (layer->getEnabled())
+
+            if (layer->isOpen())
             {
                 osg::Node* node = layer->getNode();
                 if (node)
@@ -614,6 +745,7 @@ namespace
                     container->setName(layer->getName());
                     container->addChild(node);
                     container->setStateSet(layer->getOrCreateStateSet());
+                    container->setCullCallback(new LayerCullCallbackDispatch(layer));
                     layerNodes->addChild(container);
                 }
             }
@@ -624,14 +756,11 @@ namespace
 void
 MapNode::onLayerAdded(Layer* layer, unsigned index)
 {
-    if (!layer || !layer->getEnabled())
+    if (!layer || !layer->isOpen())
         return;
-    
-    // Communicate terrain resources to the layer:
-    layer->setTerrainResources(getTerrainEngine()->getResources());
 
-    // Each layer gets a callback to change the MapNode if necessary
-    layer->getSceneGraphCallbacks()->add(new MapNodeObserverInstaller(this));
+    if (getTerrainEngine())
+        layer->invoke_prepareForRendering(getTerrainEngine());
 
     // Create the layer's node, if it has one:
     osg::Node* node = layer->getNode();
@@ -659,15 +788,15 @@ MapNode::onLayerRemoved(Layer* layer, unsigned index)
         if (node)
         {
             layer->getSceneGraphCallbacks()->fireRemoveNode(node);
-            rebuildLayerNodes(_map.get(), _layerNodes);
         }
+        rebuildLayerNodes(_map.get(), _layerNodes);
     }
 }
 
 void
 MapNode::onLayerMoved(Layer* layer, unsigned oldIndex, unsigned newIndex)
 {
-    if (layer && layer->getNode())
+    if (layer)
     {
         rebuildLayerNodes(_map.get(), _layerNodes);
     }
@@ -697,6 +826,22 @@ MapNode::openMapLayers()
 void
 MapNode::traverse( osg::NodeVisitor& nv )
 {
+    // ensure the map node is open during the very first "rendering" traversal
+    if ( !_isOpen )
+    {
+        if (nv.getVisitorType() == nv.EVENT_VISITOR ||
+            nv.getVisitorType() == nv.CULL_VISITOR ||
+            nv.getVisitorType() == nv.UPDATE_VISITOR)
+        {
+            static std::mutex s_openMutex;
+            std::lock_guard<std::mutex> lock(s_openMutex);
+            if (!_isOpen)
+            {
+                _isOpen = open();
+            }
+        }
+    }
+
     if ( nv.getVisitorType() == nv.EVENT_VISITOR )
     {
         unsigned int numBlacklist = Registry::instance()->getNumBlacklistedFilenames();
@@ -706,46 +851,115 @@ MapNode::traverse( osg::NodeVisitor& nv )
             _lastNumBlacklistedFilenames = numBlacklist;
             RemoveBlacklistedFilenamesVisitor v;
             _terrainEngine->accept( v );
+
         }
 
         // traverse:
-        std::for_each( _children.begin(), _children.end(), osg::NodeAcceptOp(nv) );
+        for (auto& child : _children)
+            child->accept(nv);
+    }
+
+    else if ( nv.getVisitorType() == nv.CULL_VISITOR)
+    {
+        osgUtil::CullVisitor* cv = Culling::asCullVisitor(nv);
+
+        // find a database pager with an ICO
+        if (cv && cv->getCurrentCamera())
+        {
+            // Store this MapNode itself
+            ObjectStorage::set(&nv, this);
+
+            osgDB::DatabasePager* pager = dynamic_cast<osgDB::DatabasePager*>(
+                nv.getDatabaseRequestHandler());
+
+            if (pager)
+                ObjectStorage::set(&nv, pager->getIncrementalCompileOperation());
+
+            if (_drapingManager != nullptr)
+                ObjectStorage::set(&nv, _drapingManager);
+        }
+
+
+        LayerVector layers;
+        getMap()->getLayers(layers);
+
+        int count = 0;
+        for (auto& layer : layers)
+        {
+            if (layer->isOpen())
+            {
+                osg::StateSet* ss = layer->getSharedStateSet(&nv);
+                if (ss)
+                {
+                    cv->pushStateSet(ss);
+                    ++count;
+                }
+            }
+        }
+
+        // traverse:
+        for (auto& child : _children)
+            child->accept(nv);
+
+        for(int i=0; i<count; ++i)
+            cv->popStateSet();
+
+        //Config c = CullDebugger().dumpRenderBin(cv->getCurrentRenderBin());
+        //OE_INFO << c.toJSON(true) << std::endl;
+        //exit(0);
+
+        // after any cull, allow an update traversal.
+        _readyForUpdate.exchange(true);
+    }
+
+    else if (nv.getVisitorType() == nv.UPDATE_VISITOR)
+    {
+        ObjectStorage::set(&nv, this);
+
+        // Ensures only one update will happen per frame loop
+        if (_readyForUpdate.exchange(false))
+        {
+            // re-enable if we decide to use it.
+            //JobArena::get(JobArena::UPDATE_TRAVERSAL)->runJobs();
+        }
+
+        // include these in the above condition as well??
+        osg::Group::traverse(nv);
     }
 
     else
     {
         if (dynamic_cast<osgUtil::BaseOptimizerVisitor*>(&nv) == 0L)
-            osg::Group::traverse( nv );
+        {
+            // Store this MapNode itself
+            ObjectStorage::set(&nv, this);
+
+            osg::Group::traverse(nv);
+        }
     }
 }
 
 void
 MapNode::resizeGLObjectBuffers(unsigned maxSize)
 {
-    osg::Group::resizeGLObjectBuffers(maxSize);
-
     LayerVector layers;
     getMap()->getLayers(layers);
     for (LayerVector::const_iterator i = layers.begin(); i != layers.end(); ++i)
     {
-        if ((*i)->getStateSet()) {
-            (*i)->getStateSet()->resizeGLObjectBuffers(maxSize);
-        }
+        i->get()->resizeGLObjectBuffers(maxSize);
     }
+
+    osg::Group::resizeGLObjectBuffers(maxSize);
 }
 
 void
 MapNode::releaseGLObjects(osg::State* state) const
 {
-    osg::Group::releaseGLObjects(state);
-
     LayerVector layers;
     getMap()->getLayers(layers);
     for (LayerVector::const_iterator i = layers.begin(); i != layers.end(); ++i)
     {
-        if ((*i)->getStateSet()) {
-            (*i)->getStateSet()->releaseGLObjects(state);
-        }
+        i->get()->releaseGLObjects(state);
     }
 
     // osg::Node doesn't release nested callbacks, oops
@@ -755,16 +969,43 @@ MapNode::releaseGLObjects(osg::State* state) const
         uc->releaseGLObjects(state);
     for(const osg::Callback* ec = getEventCallback(); ec; ec = ec->getNestedCallback())
         ec->releaseGLObjects(state);
-}
 
-DrapingManager*
-MapNode::getDrapingManager()
-{
-    return _drapingManager;
+    // run this prior to the static bins and pools.
+    osg::Group::releaseGLObjects(state);
+
+    // indirect rendering objects
+    ChonkRenderBin::releaseSharedGLObjects(state);
+
+    // managed GL objects
+    GLObjectPool::releaseGLObjects(state);
 }
 
 ClampingManager*
 MapNode::getClampingManager()
 {
     return _clampingManager;
+}
+
+bool
+MapNode::getGeoPointUnderMouse(
+    osg::View* view,
+    float mx, float my,
+    GeoPoint& output) const
+{
+    osg::Vec3d world;
+    if (getTerrain()->getWorldCoordsUnderMouse(view, mx, my, world))
+    {
+        return output.fromWorld(getMapSRS(), world);
+    }
+    return false;
+}
+
+GeoPoint
+MapNode::getGeoPointUnderMouse(
+    osg::View* view,
+    float mx, float my) const
+{
+    GeoPoint p;
+    getGeoPointUnderMouse(view, mx, my, p);
+    return p;
 }

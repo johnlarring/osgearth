@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -29,59 +29,54 @@
 #endif
 
 #if (OSGEARTH_DEVEL_VERSION > 0)
-#    define isDevelopmentVersion " DEVELOPMENT "
+#    define isDevelopmentVersion " (DEVELOPMENT) "
 #else
 #    define isDevelopmentVersion " "
 #endif
 
 extern "C" {
 
-const char* osgEarthGetVersion()
-{
-    static char osgearth_version[256];
-    static int osgearth_version_init = 1;
-    if (osgearth_version_init)
+    const char* osgEarthGetVersion()
     {
-        if (OSGEARTH_RC_VERSION == 0 )
+        static char osgearth_version[256];
+        static int osgearth_version_init = 1;
+        if (osgearth_version_init)
         {
-            sprintf(osgearth_version,"%d.%d.%d%s",
+            sprintf(osgearth_version,"%d.%d.%d build %d",
                 OSGEARTH_MAJOR_VERSION,
                 OSGEARTH_MINOR_VERSION,
                 OSGEARTH_PATCH_VERSION,
-                isDevelopmentVersion);
-        }
-        else
-        {
-            sprintf(osgearth_version,"%d.%d.%d RC%d%s",
-                OSGEARTH_MAJOR_VERSION,
-                OSGEARTH_MINOR_VERSION,
-                OSGEARTH_PATCH_VERSION,
-                OSGEARTH_RC_VERSION,
-                isDevelopmentVersion );
-        }
+                OSGEARTH_SOVERSION);
 
-        osgearth_version_init = 0;
-    }
+            osgearth_version_init = 0;
+        }
     
-    return osgearth_version;
-}
+        return osgearth_version;
+    }
 
-const char* osgEarthGetSOVersion()
-{
-    static char osgearth_soversion[32];
-    static int osgearth_soversion_init = 1;
-    if (osgearth_soversion_init)
+    const char* osgEarthGetSOVersion()
     {
-        sprintf(osgearth_soversion,"%d",OSGEARTH_SOVERSION);
-        osgearth_soversion_init = 0;
-    }
+        static char osgearth_soversion[32];
+        static int osgearth_soversion_init = 1;
+        if (osgearth_soversion_init)
+        {
+            sprintf(osgearth_soversion,"%d", OSGEARTH_SOVERSION);
+            osgearth_soversion_init = 0;
+        }
     
-    return osgearth_soversion;
+        return osgearth_soversion;
+    }
+
+    const char* osgEarthGetLibraryName()
+    {
+        return "osgEarth";
+    }
+
 }
 
-const char* osgEarthGetLibraryName()
+osgEarth::Version osgEarth::parseVersion(const char* in)
 {
-    return "osgEarth Library";
-}
-
+    osgEarth::Version v;
+    sscanf(in, "%d.%d.%d", &v.major, &v.minor, &v.patch);
+    return v;
 }

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -28,8 +28,15 @@
 #include <osgEarth/TileVisitor>
 #include <osgEarth/ImageLayer>
 #include <osgEarth/ElevationLayer>
+#include <osgEarth/MapNode>
+#include <osgEarth/OGRFeatureSource>
+#include <osgEarth/ImageUtils>
+#include <osgEarth/TileEstimator>
+
 #include <osg/ArgumentParser>
 #include <osg/Timer>
+#include <osgDB/ReadFile>
+
 #include <iomanip>
 #include <algorithm>
 #include <iterator>
@@ -42,85 +49,163 @@ int usage(char** argv)
     std::cout
         << "Converts tiles from one format to another.\n\n"
         << argv[0]
-        << "\n    --in [prop_name] [prop_value]       : set an input property"
+        << "\n    --in [prop_name] [prop_value]       : set an input property (instead of using --in-earth)"
+        << "\n    --in-earth [earthfile]              : earth file from which to load input layer (instead of using --in)"
+        << "\n    --in-layer [layer name]             : with --in-earth, name of layer to convert"
         << "\n    --out [prop_name] [prop_value]      : set an output property"
-        << "\n    --elevation                         : convert as elevation data (default is image)"
         << "\n    --profile [profile def]             : set an output profile (optional; default = same as input)"
         << "\n    --min-level [int]                   : minimum level of detail"
         << "\n    --max-level [int]                   : maximum level of detail"
         << "\n    --osg-options [OSG options string]  : options to pass to OSG readers/writers"
         << "\n    --extents [minLat] [minLong] [maxLat] [maxLong] : Lat/Long extends to copy"
+        << "\n    --no-overwrite                      : skip tiles that already exist in the destination"
+        << "\n    --threads [int]                     : go faster by using [n] working threads"
         << std::endl;
 
     return 0;
 }
 
-
-// TileHandler that copies images from an ImageLayer to a TileSource.
-// This will automatically handle any mosaicing and reprojection that is
-// necessary to translate from one Profile/SRS to another.
-struct ImageLayerToTileSource : public TileHandler
+// Visitor that converts image tiles
+struct ImageLayerTileCopy : public TileHandler
 {
-    ImageLayerToTileSource(ImageLayer* source, TileSource* dest)
-        : _source(source), _dest(dest)
+    ImageLayerTileCopy(ImageLayer* source, ImageLayer* dest, bool overwrite, bool compress)
+        : _source(source), _dest(dest), _overwrite(overwrite), _compress(compress)
     {
         //nop
     }
 
-    bool handleTile(const TileKey& key, const TileVisitor& tv)
+    bool handleTile(const TileKey& key, const TileVisitor& tv) override
     {
         bool ok = false;
+
+        // if overwriting is disabled, check to see whether the destination
+        // already has data for the key
+        if (_overwrite == false)
+        {
+            if (_dest->createImage(key).valid())
+            {
+                return true;
+            }
+        }
+
         GeoImage image = _source->createImage(key);
         if (image.valid())
-            ok = _dest->storeImage(key, image.getImage(), 0L);
+        {
+            osg::ref_ptr<const osg::Image> imageToWrite = image.getImage();
+            if (_compress)
+                imageToWrite = ImageUtils::compressImage(image.getImage(), "cpu");
+
+            Status status = _dest->writeImage(key, imageToWrite.get(), 0L);
+            ok = status.isOK();
+            if (!ok)
+            {
+                OE_WARN << key.str() << ": " << status.message() << std::endl;
+            }
+        }
 
         return ok;
     }
 
-    bool hasData(const TileKey& key) const
+    bool hasData(const TileKey& key) const override
     {
-        return _source->mayHaveDataInExtent(key.getExtent());
+        return _source->mayHaveData(key);
+    }
+
+    unsigned getEstimatedTileCount(
+        const std::vector<GeoExtent>& extents,
+        unsigned minLevel,
+        unsigned maxLevel) const override
+    {
+        TileEstimator e;
+        e.setMinLevel(minLevel);
+        e.setMaxLevel(maxLevel);
+        e.setProfile(_dest->getProfile());
+        for (auto& src_extent : extents)
+        {
+            auto dest_extent = _dest->getProfile()->clampAndTransformExtent(src_extent);
+            e.addExtent(dest_extent);
+        }
+        return e.getNumTiles();
     }
 
     osg::ref_ptr<ImageLayer> _source;
-    TileSource*              _dest;
+    osg::ref_ptr<ImageLayer> _dest;
+    bool _overwrite;
+    bool _compress;
 };
 
-
-// TileHandler that copies images from an ElevationLayer to a TileSource.
-// This will automatically handle any mosaicing and reprojection that is
-// necessary to translate from one Profile/SRS to another.
-struct ElevationLayerToTileSource : public TileHandler
+// Visitor that converts elevation tiles
+struct ElevationLayerTileCopy : public TileHandler
 {
-    ElevationLayerToTileSource(ElevationLayer* source, TileSource* dest)
-        : _source(source), _dest(dest)
+    ElevationLayerTileCopy(ElevationLayer* source, ElevationLayer* dest, bool overwrite)
+        : _source(source), _dest(dest), _overwrite(overwrite)
     {
         //nop
     }
 
-    bool handleTile(const TileKey& key, const TileVisitor& tv)
+    bool handleTile(const TileKey& key, const TileVisitor& tv) override
     {
         bool ok = false;
+
+        // if overwriting is disabled, check to see whether the destination
+        // already has data for the key
+        if (_overwrite == false)
+        {
+            if (_dest->createHeightField(key).valid())
+            {
+                return true;
+            }
+        }
+
         GeoHeightField hf = _source->createHeightField(key, 0L);
         if ( hf.valid() )
-            ok = _dest->storeHeightField(key, hf.getHeightField(), 0L);
+        {
+            Status s = _dest->writeHeightField(key, hf.getHeightField(), 0L);
+            ok = s.isOK();
+            if (!ok)
+            {
+                OE_WARN << key.str() << ": " << s.message() << std::endl;
+            }
+        }
+        else
+        {
+            //OE_WARN << key.str() << " : " << hf.getStatus().message() << std::endl;
+        }
         return ok;
     }
 
-    bool hasData(const TileKey& key) const
+    bool hasData(const TileKey& key) const override
     {
-        return _source->mayHaveDataInExtent(key.getExtent());
+        return _source->mayHaveData(key);
+    }
+
+    unsigned getEstimatedTileCount(
+        const std::vector<GeoExtent>& extents,
+        unsigned minLevel,
+        unsigned maxLevel) const override
+    {
+        TileEstimator e;
+        e.setMinLevel(minLevel);
+        e.setMaxLevel(maxLevel);
+        e.setProfile(_dest->getProfile());
+        for (auto& src_extent : extents)
+        {
+            auto dest_extent = _dest->getProfile()->clampAndTransformExtent(src_extent);
+            e.addExtent(dest_extent);
+        }
+        return e.getNumTiles();
     }
 
     osg::ref_ptr<ElevationLayer> _source;
-    TileSource*                  _dest;
+    osg::ref_ptr<ElevationLayer> _dest;
+    bool _overwrite;
 };
 
 
 // Custom progress reporter
 struct ProgressReporter : public osgEarth::ProgressCallback
 {
-    ProgressReporter() : _first(true) { }
+    ProgressReporter() : _first(true), _start(0) { }
 
     bool reportProgress(double             current,
                         double             total,
@@ -128,7 +213,7 @@ struct ProgressReporter : public osgEarth::ProgressCallback
                         unsigned           totalStages,
                         const std::string& msg )
     {
-        _mutex.lock();
+        std::lock_guard<std::mutex> lock(_mutex);
 
         if (_first)
         {
@@ -137,36 +222,63 @@ struct ProgressReporter : public osgEarth::ProgressCallback
         }
         osg::Timer_t now = osg::Timer::instance()->tick();
 
-        
+        if (total > 0.0f)
+        {
+            float percentage = current / total;
 
-        float percentage = current/total;
+            double timeSoFar = osg::Timer::instance()->delta_s(_start, now);
+            double projectedTotalTime = timeSoFar / percentage;
+            double timeToGo = projectedTotalTime - timeSoFar;
+            
+            constexpr double secondsPerMinute = 60.0;
+            constexpr double secondsPerHour = secondsPerMinute * 60.0;
+            constexpr double secondsPerDay = secondsPerHour * 24.0;
+            
+            double timeToGoRemainder = timeToGo;
+            double daysToGo = timeToGoRemainder / secondsPerDay;
+            timeToGoRemainder = fmod(timeToGoRemainder, secondsPerDay);
+            double hoursToGo = timeToGoRemainder / secondsPerHour;
+            timeToGoRemainder = fmod(timeToGoRemainder, secondsPerHour);
+            double minsToGo = timeToGoRemainder / secondsPerMinute;
+            double secsToGo = fmod(timeToGoRemainder, secondsPerMinute);
+            
+            double projectedTotalTimeRemainder = projectedTotalTime;
+            double daysTotal = projectedTotalTimeRemainder / secondsPerDay;
+            projectedTotalTimeRemainder = fmod(projectedTotalTimeRemainder, secondsPerDay);
+            double hoursTotal = projectedTotalTimeRemainder / secondsPerHour;
+            projectedTotalTimeRemainder = fmod(projectedTotalTimeRemainder, secondsPerHour);
+            double minsTotal = projectedTotalTimeRemainder / secondsPerMinute;
+            double secsTotal = fmod(projectedTotalTimeRemainder, secondsPerMinute);
+            
+            std::cout
+                << std::fixed
+                << std::setprecision(1) << "\r"
+                << (int)current << "/" << (int)total
+                << " " << int(100.0f*percentage) << "% complete, "
+                << (int)daysTotal << "d" << (int)hoursTotal << "h" << (int)minsTotal << "m" << (int)secsTotal << "s projected, "
+                << (int)daysToGo << "d" << (int)hoursToGo << "h" << (int)minsToGo << "m" << (int)secsToGo << "s remaining          "
+                << std::flush;
 
-        double timeSoFar = osg::Timer::instance()->delta_s(_start, now);
-        double projectedTotalTime = timeSoFar/percentage;
-        double timeToGo = projectedTotalTime - timeSoFar;
-        double minsToGo = timeToGo/60.0;
-        double secsToGo = fmod(timeToGo,60.0);
-        double minsTotal = projectedTotalTime/60.0;
-        double secsTotal = fmod(projectedTotalTime,60.0);
+            if (percentage >= 100.0f)
+                std::cout << std::endl;
+        }
+        else
+        {
 
-        std::cout
-            << std::fixed
-            << std::setprecision(1) << "\r"
-            << (int)current << "/" << (int)total
-            << " (" << (100.0f*percentage) << "%, " 
-            << (int)minsTotal << "m" << (int)secsTotal << "s projected, "
-            << (int)minsToGo << "m" << (int)secsToGo << "s remaining)        "
-            << std::flush;
+            double timeSoFar = osg::Timer::instance()->delta_s(_start, now);
 
-        if ( percentage >= 100.0f )
-            std::cout << std::endl;
-
-        _mutex.unlock();
+            std::cout
+                << std::fixed
+                << std::setprecision(1) << "\r"
+                << (int)current << "/" << (int)total
+                << " " << timeSoFar << "s elapsed"
+                << std::flush;
+        }
 
         return false;
     }
 
-    Threading::Mutex _mutex;
+    std::mutex _mutex;
     bool _first;
     osg::Timer_t _start;
 };
@@ -178,96 +290,167 @@ struct ProgressReporter : public osgEarth::ProgressCallback
  * to look in the header file for each driver's Options structure for
  * options :)
  *
- * Example: copy a GDAL file to an MBTiles repo:
+ * Example #2: copy a GDAL file to an MBTiles repo using --in:
  *
  *   osgearth_conv
- *      --in driver gdal
+ *      --in driver gdalimage
  *      --in url world.tif
- *      --out driver mbtiles
+ *      --out driver mbtilesimage
  *      --out format image/png
- *      --out filename world.db
+ *      --out filename world.mbtiles
  *
- * The "in" properties come from the GDALOptions getConfig method. The
- * "out" properties come from the MBTilesOptions getConfig method.
+ *   The "in" properties come from the GDALOptions getConfig method. The
+ *   "out" properties come from the MBTilesOptions getConfig method.
+ *
+ * Example #2: copy an earth file layer to an MBTiles repo using --in-earth:
+ *
+ *   osgearth_conv
+ *      --in-earth myfile.earth
+ *      --in-layer my_image_layer_name
+ *      --out driver mbtilesimage
+ *      --out format image/png
+ *      --out filename world.mbtiles
  *
  * Other arguments:
  *
- *      --elevation           : convert as elevation data (instead of image data)
  *      --profile [profile]   : reproject to the target profile, e.g. "wgs84"
  *      --min-level [int]     : min level of detail to copy
  *      --max-level [int]     : max level of detail to copy
- *      --threads [n]         : threads to use (may crash. Careful.)
- *
  *      --extents [minLat] [minLong] [maxLat] [maxLong] : Lat/Long extends to copy (*)
+ *      --no-overwrite        : don't overwrite data that already exists
+ *      --threads [int]       : number of threads to launch
  *
  * OSG arguments:
  *
  *      -O <string>           : OSG Options string (plugin options)
  *
- * Of course, the output driver must support writing (by implementing
- * the ReadWriteTileSource interface).
+ * Of course, the output layer must support writing.
+ * Of course, the output layer must support writing.
  */
 int
 main(int argc, char** argv)
 {
-    osg::ArgumentParser args(&argc,argv);
+    osg::ArgumentParser args(&argc, argv);
 
-    if ( argc == 1 )
+    if (argc == 1)
         return usage(argv);
 
-    typedef std::map<std::string,std::string> KeyValue;
-    std::string key, value;
+    osgDB::readCommandLine(args);
 
-    // collect input configuration:
-    Config inConf;
-    while( args.read("--in", key, value) )
-        inConf.set(key, value);
-
-    osg::ref_ptr<osgDB::Options> dbo = new osgDB::Options();
+    if (args.read("--pause"))
+    {
+        std::cout << "Press enter to continue" << std::endl;
+        getchar();
+    }
 
     // plugin options, if the user passed them in:
+    osg::ref_ptr<osgDB::Options> dbo = new osgDB::Options();
     std::string str;
-    while(args.read("--osg-options", str) || args.read("-O", str))
+    while (args.read("--osg-options", str) || args.read("-O", str))
     {
-        dbo->setOptionString( str );
+        dbo->setOptionString(str);
     }
 
-    TileSourceOptions inOptions(inConf);
-    osg::ref_ptr<TileSource> input = TileSourceFactory::create(inOptions);
-    if ( !input.valid() )
+    typedef std::unordered_map<std::string, std::string> KeyValue;
+    std::string key, value;
+
+    // There are two paths. Either the user defines a source layer on
+    // the command line using "--in" options, or the user specifies
+    // an earth file and layer name.
+    osg::ref_ptr<TileLayer> input;
+    Config inConf;
+
+    // earth file option:
+    std::string earthFile;
+    osg::ref_ptr<MapNode> mapNode;
+    osg::ref_ptr<const Map> map;
+    if (args.read("--in-earth", earthFile))
     {
-        OE_WARN << LC << "Failed to open input" << std::endl;
-        return -1;
+        std::string layerName;
+        if (!args.read("--in-layer", layerName))
+        {
+            OE_WARN << "Missing required argument --in-layer" << std::endl;
+            return -1;
+        }
+
+        osg::ref_ptr<osg::Node> node = osgDB::readRefNodeFile(earthFile, dbo.get());
+        mapNode = MapNode::get(node.get());
+        if (mapNode.valid())
+        {
+            mapNode->open();
+            map = mapNode->getMap();
+        }
+
+        input = map->getLayerByName<TileLayer>(layerName);
+        if (!input.valid())
+        {
+            OE_WARN << "Layer \"" << layerName << "\" not found in the earth file" << std::endl;
+            return -1;
+        }
+
+        inConf = input->getConfig();
     }
 
-    Status inputStatus = input->open( input->MODE_READ, dbo.get() );
-    if ( inputStatus.isError() )
+    // command line input option:
+    else
+    {
+        // collect input configuration:
+        while (args.read("--in", key, value))
+            inConf.set(key, value);
+
+        inConf.key() = inConf.value("driver");
+
+        auto layer = Layer::create(ConfigOptions(inConf));
+        input = dynamic_cast<TileLayer*>(layer.get());
+        if (!input)
+        {
+            OE_WARN << LC << "Failed to open input for " << inConf.toJSON(false) << std::endl;
+            return -1;
+        }
+    }
+
+    // Assign a custom tile size to the input source, if possible:
+    unsigned tileSize = input->getTileSize();
+    if (args.read("--tile-size", tileSize))
+    {
+        input->setTileSize(tileSize);
+    }
+
+    // Open the input layer:
+    input->setReadOptions(dbo.get());
+    Status inputStatus = input->open();
+    if (inputStatus.isError())
     {
         OE_WARN << LC << "Error initializing input: " << inputStatus.message() << std::endl;
         return -1;
     }
 
     // collect output configuration:
+    bool compress = false;
     Config outConf;
-    while( args.read("--out", key, value) )
+    while (args.read("--out", key, value))
+    {
         outConf.set(key, value);
 
-    // heightfields?
-    bool heightFields = args.read("--heightfield") || args.read("--hf") || args.read("--elevation");
-    if ( heightFields )
-        OE_INFO << LC << "Converting heightfield tiles" << std::endl;
-    else
-        OE_INFO << LC << "Converting image tiles" << std::endl;
+        // special case: turn on compression when using dds at the output format
+        // and disable the built-in image flipping logic
+        if (key == "format" && value == "dds")
+        {
+            compress = true;
+            //dbo->setOptionString("ddsNoAutoFlipWrite " + dbo->getOptionString());
+        }
+    }
+    outConf.key() = outConf.value("driver");
 
     // are we changing profiles?
     osg::ref_ptr<const Profile> outputProfile = input->getProfile();
     std::string profileString;
     bool isSameProfile = true;
 
-    if ( args.read("--profile", profileString) )
+    if (args.read("--profile", profileString))
     {
         outputProfile = Profile::create(profileString);
-        if ( !outputProfile.valid() || !outputProfile->isOK() )
+        if (!outputProfile.valid() || !outputProfile->isOK())
         {
             OE_WARN << LC << "Output profile is not recognized" << std::endl;
             return -1;
@@ -280,31 +463,17 @@ main(int argc, char** argv)
     outConf.add("profile", profileOptions.getConfig());
 
     // open the output tile source:
-    TileSourceOptions outOptions(outConf);
-    osg::ref_ptr<TileSource> output = TileSourceFactory::create(outOptions);
-    if ( !output.valid() )
+    auto layer = Layer::create(ConfigOptions(outConf));
+    osg::ref_ptr<TileLayer> output = dynamic_cast<TileLayer*>(layer.get());
+    if (!output)
     {
-        OE_WARN << LC << "Failed to open output." << std::endl;
+        OE_WARN << LC << "Failed to create output layer" << std::endl;
         return -1;
     }
 
-    // Copy over the data extents to the output datasource.
-    for (DataExtentList::const_iterator itr = input->getDataExtents().begin(); itr != input->getDataExtents().end(); ++itr)
-    {
-        // Convert the data extent to the profile that is actually used by the output tile source
-        DataExtent dataExtent = *itr;
-        GeoExtent ext = dataExtent.transform(outputProfile->getSRS());
-        unsigned int minLevel = 0;
-        unsigned int maxLevel = outputProfile->getEquivalentLOD( input->getProfile(), *dataExtent.maxLevel() );
-        DataExtent outputExtent = DataExtent(ext, minLevel, maxLevel);
-        output->getDataExtents().push_back( outputExtent );
-    }
-
-    Status outputStatus = output->open(
-        TileSource::MODE_WRITE | TileSource::MODE_CREATE,
-        dbo.get() );
-
-    if ( outputStatus.isError() )
+    output->setReadOptions(dbo.get());
+    Status outputStatus = output->openForWriting();
+    if (outputStatus.isError())
     {
         OE_WARN << LC << "Error initializing output: " << outputStatus.message() << std::endl;
         return -1;
@@ -322,60 +491,64 @@ main(int argc, char** argv)
     // create the visitor.
     osg::ref_ptr<TileVisitor> visitor;
 
-    unsigned numThreads = 1;
-    if (args.read("--threads", numThreads))
+    unsigned numThreads = 4;
+    args.read("--threads", numThreads);
+    MultithreadedTileVisitor* mtv = new MultithreadedTileVisitor();
+    mtv->setNumThreads(numThreads < 1 ? 1 : numThreads);
+    visitor = mtv;
+
+    bool overwrite = true;
+    if (args.read("--no-overwrite"))
+        overwrite = false;
+
+    if (dynamic_cast<ImageLayer*>(input.get()) && dynamic_cast<ImageLayer*>(output.get()))
     {
-        MultithreadedTileVisitor* mtv = new MultithreadedTileVisitor();
-        mtv->setNumThreads( numThreads < 1 ? 1 : numThreads );
-        visitor = mtv;
+        visitor->setTileHandler(new ImageLayerTileCopy(
+            dynamic_cast<ImageLayer*>(input.get()),
+            dynamic_cast<ImageLayer*>(output.get()),
+            overwrite,
+            compress));
     }
-    else
+    else if (dynamic_cast<ElevationLayer*>(input.get()) && dynamic_cast<ElevationLayer*>(output.get()))
     {
-        visitor = new TileVisitor();
+        visitor->setTileHandler(new ElevationLayerTileCopy(
+            dynamic_cast<ElevationLayer*>(input.get()),
+            dynamic_cast<ElevationLayer*>(output.get()),
+            overwrite));
     }
 
-    if (heightFields)
-    {
-        ElevationLayer* layer = new ElevationLayer(ElevationLayerOptions(), input.get());
-        Status layerStatus = layer->open();
-        if (layerStatus.isError())
-        {
-            OE_WARN << "Failed to create input ElevationLayer " << layerStatus.message() << std::endl;
-            return -1;
-        }
-        if ( !layer->getProfile() || !layer->getProfile()->isOK() )
-        {
-            OE_WARN << LC << "Input profile is not valid" << std::endl;
-            return -1;
-        }
-        visitor->setTileHandler( new ElevationLayerToTileSource(layer, output.get()) );
-    }
-
-    else // image layers
-    {
-        ImageLayer* layer = new ImageLayer(ImageLayerOptions(), input.get());
-        Status layerStatus = layer->open();
-        if (layerStatus.isError())
-        {
-            OE_WARN << "Failed to create input ImageLayer " << layerStatus.message() << std::endl;
-            return -1;
-        }
-        if ( !layer->getProfile() || !layer->getProfile()->isOK() )
-        {
-            OE_WARN << LC << "Input profile is not valid" << std::endl;
-            return -1;
-        }
-        visitor->setTileHandler( new ImageLayerToTileSource(layer, output.get()) );
-    }
-
-    // set the manula extents, if specified:
-    bool userSetExtents = false;
+    // set the manual extents, if specified:
     double minlat, minlon, maxlat, maxlon;
-    while( args.read("--extents", minlat, minlon, maxlat, maxlon) )
+    GeoExtent userExtent;
+    while (args.read("--extents", minlat, minlon, maxlat, maxlon))
     {
-        GeoExtent extent(SpatialReference::get("wgs84"), minlon, minlat, maxlon, maxlat);
-        visitor->addExtent( extent );
-        userSetExtents = true;
+        userExtent = GeoExtent(SpatialReference::get("wgs84"), minlon, minlat, maxlon, maxlat);
+        visitor->addExtentToVisit(userExtent);
+    }
+
+    // Read in an index shapefile to drive where to tile
+    std::string index;
+
+    while (args.read("--index", index))
+    {
+        osg::ref_ptr< OGRFeatureSource > indexFeatures = new OGRFeatureSource;
+        indexFeatures->setURL(index);
+        if (indexFeatures->open().isError())
+        {
+            OE_WARN << "Failed to open index " << index << ": " << indexFeatures->getStatus().toString() << std::endl;
+            return -1;
+        }
+
+        osg::ref_ptr< FeatureCursor > cursor = indexFeatures->createFeatureCursor();
+        while (cursor.valid() && cursor->hasMore())
+        {
+            osg::ref_ptr< Feature > feature = cursor->nextFeature();
+            osgEarth::Bounds featureBounds = feature->getGeometry()->getBounds();
+            GeoExtent ext(feature->getSRS(), featureBounds);
+            ext = input->getProfile()->clampAndTransformExtent(ext);
+
+            visitor->addExtentToDataIndex(ext);
+        }
     }
 
     // Set the level limits:
@@ -386,34 +559,80 @@ main(int argc, char** argv)
     bool maxLevelSet = args.read("--max-level", maxLevel);
 
     // figure out the max source level:
-    if ( !minLevelSet || !maxLevelSet )
+    if (!minLevelSet || !maxLevelSet)
     {
-        for(DataExtentList::const_iterator i = input->getDataExtents().begin();
-            i != input->getDataExtents().end();
-            ++i)
+        DataExtentList dataExtents;
+        input->getDataExtents(dataExtents);
+        for (auto& de : dataExtents)
         {
-            if ( !maxLevelSet && i->maxLevel().isSet() && i->maxLevel().value() > maxLevel )
-                maxLevel = i->maxLevel().value();
-            if ( !minLevelSet && i->minLevel().isSet() && i->minLevel().value() < minLevel )
-                minLevel = i->minLevel().value();
+            if (!maxLevelSet && de.maxLevel().isSet() && de.maxLevel().get() > maxLevel)
+                maxLevel = de.maxLevel().get();
 
-            if (userSetExtents == false)
+            if (!minLevelSet && de.minLevel().isSet() && de.minLevel().get() < minLevel)
+                minLevel = de.minLevel().get();
+
+            if (userExtent.isInvalid())
             {
-                visitor->addExtent(*i);
+                visitor->addExtentToVisit(de);
             }
         }
     }
 
-    if ( minLevel < ~0 )
+    if (minLevel < ~0)
     {
-        visitor->setMinLevel( minLevel );
+        visitor->setMinLevel(minLevel);
     }
 
-    if ( maxLevel > 0 )
+    if (maxLevel > 0)
     {
-        maxLevel = outputProfile->getEquivalentLOD( input->getProfile(), maxLevel );
-        visitor->setMaxLevel( maxLevel );
+        maxLevel = outputProfile->getEquivalentLOD(input->getProfile(), maxLevel);
+        visitor->setMaxLevel(maxLevel);
         OE_NOTICE << LC << "Calculated max level = " << maxLevel << std::endl;
+    }
+
+    // If we've not added any extents to visit just add the entire input extent
+    if (visitor->getExtentsToVisit().empty())
+    {
+        visitor->addExtentToVisit(input->getProfile()->getExtent());
+    }
+
+    DataExtentList outputExtents;
+    if (userExtent.isInvalid())
+    {
+        // Transform and copy over the data extents to the output datasource.
+        DataExtentList inputExtents;
+        input->getDataExtents(inputExtents);
+
+        for (DataExtentList::const_iterator itr = inputExtents.begin(); itr != inputExtents.end(); ++itr)
+        {
+            // Convert the data extent to the profile that is actually used by the output tile source
+            const DataExtent& inputExtent = *itr;
+            GeoExtent outputExtent = outputProfile->clampAndTransformExtent(inputExtent);
+            DataExtent result(outputExtent, 0, outputProfile->getEquivalentLOD(input->getProfile(), inputExtent.maxLevel().get()));
+            outputExtents.push_back(result);
+        }
+    }
+    else
+    {
+        // Use the user set extents
+        GeoExtent outputExtent = outputProfile->clampAndTransformExtent(userExtent);
+        DataExtent result(outputExtent, outputProfile->getEquivalentLOD(input->getProfile(), minLevel), outputProfile->getEquivalentLOD(input->getProfile(), maxLevel));
+        outputExtents.push_back(result);
+    }
+
+    if (outputExtents.empty())
+    {
+        // The input has no data extents and the user didn't specify an extent, so use the entire output profile's extent
+        DataExtent result(outputProfile->getExtent(),
+                          outputProfile->getEquivalentLOD(input->getProfile(), minLevel),
+                          outputProfile->getEquivalentLOD(input->getProfile(), maxLevel));
+        outputExtents.push_back(result);
+    }
+
+
+    if (!outputExtents.empty())
+    {
+        output->setDataExtents(outputExtents);
     }
 
     // Ready!!!
@@ -428,7 +647,8 @@ main(int argc, char** argv)
     osg::Timer_t t1 = osg::Timer::instance()->tick();
 
     std::cout
-        << "Time = "
+        << std::endl
+        << "Complete. Time = "
         << std::fixed
         << std::setprecision(1)
         << osg::Timer::instance()->delta_s(t0, t1)

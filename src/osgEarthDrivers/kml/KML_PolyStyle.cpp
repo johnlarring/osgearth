@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -32,7 +32,7 @@ KML_PolyStyle::scan( xml_node<>* node, Style& style, KMLContext& cx )
 		if (!colorVal.empty())
 		{
 			color = Color(Stringify() << "#" << colorVal, Color::ABGR);
-            poly->fill()->color() = color;
+            poly->fill().mutable_value().color() = color;
 		}
 
         if (poly)
@@ -44,7 +44,7 @@ KML_PolyStyle::scan( xml_node<>* node, Style& style, KMLContext& cx )
     			fill = (as<int>(fillVal, 1) == 1);
 			    if (!fill)
 			    {
-                    poly->fill()->color().a() = 0.0f;
+                    poly->fill().mutable_value().color().a() = 0.0f;
 			    }
 		    }
 

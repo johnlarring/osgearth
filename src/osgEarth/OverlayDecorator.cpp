@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -24,7 +24,7 @@
 
 #include <osg/AutoTransform>
 #include <osg/ShapeDrawable>
-
+#include <osgDB/ReadFile>
 
 #define LC "[OverlayDecorator] "
 
@@ -33,6 +33,7 @@
 
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 //---------------------------------------------------------------------------
 
@@ -75,33 +76,33 @@ namespace
 
     void setFar(osg::Matrix& m, double newFar)
     {
-        if ( osg::equivalent(m(0,3),0.0) && osg::equivalent(m(1,3),0.0) && osg::equivalent(m(2,3),0.0) )
+        if (ProjectionMatrix::isOrtho(m))
         {
-            double l,r,b,t,n,f;
-            m.getOrtho(l,r,b,t,n,f);
-            m.makeOrtho(l,r,b,t,n,newFar);
+            double l, r, b, t, n, f;
+            ProjectionMatrix::getOrtho(m, l, r, b, t, n, f);
+            ProjectionMatrix::setOrtho(m, l, r, b, t, n, newFar);
         }
         else
         {
             double v,a,n,f;
-            m.getPerspective(v,a,n,f);
-            m.makePerspective(v,a,n,newFar);
+            ProjectionMatrix::getPerspective(m, v, a, n, f);
+            ProjectionMatrix::setPerspective(m, v, a, n, newFar);
         }
     }
 
     void clampToNearFar(osg::Matrix& m, double newNear, double newFar)
     {
-        if ( osg::equivalent(m(0,3),0.0) && osg::equivalent(m(1,3),0.0) && osg::equivalent(m(2,3),0.0) )
+        if (ProjectionMatrix::isOrtho(m))
         {
-            double l,r,b,t,n,f;
-            m.getOrtho(l,r,b,t,n,f);
-            m.makeOrtho(l,r,b,t, std::max(n, newNear), std::min(f,newFar));
+            double l, r, b, t, n, f;
+            ProjectionMatrix::getOrtho(m, l, r, b, t, n, f);
+            ProjectionMatrix::setOrtho(m, l, r, b, t, std::max(n, newNear), std::min(f, newFar));
         }
         else
         {
             double v,a,n,f;
-            m.getPerspective(v,a,n,f);
-            m.makePerspective(v,a, std::max(n, newNear), std::min(f, newFar));
+            ProjectionMatrix::getPerspective(m, v, a, n, f);
+            ProjectionMatrix::setPerspective(m, v, a, std::max(n, newNear), std::min(f, newFar));
         }
     }
 
@@ -157,7 +158,7 @@ namespace
 
                 if ( t0 >= 0.0 && t1 >= 0.0 )
                 {
-                    osg::Vec3d v = d*std::min(t0,t1);
+                    osg::Vec3d v = d*osg::minimum(t0,t1);
                     dist2 = v.length2();
                 }
                 else if ( t0 >= 0.0 )
@@ -271,12 +272,12 @@ namespace
 //---------------------------------------------------------------------------
 
 OverlayDecorator::OverlayDecorator() :
-_dumpRequested       ( false ),
-_rttTraversalMask    ( ~0 ),
-_maxHorizonDistance  ( DBL_MAX ),
-_totalOverlayChildren( 0 ),
-_maxHeight           ( 500000.0 ),
-_isGeocentric(true)
+    _dumpRequested(false),
+    _rttTraversalMask(~0),
+    _maxHorizonDistance(DBL_MAX),
+    _totalOverlayChildren(0),
+    _maxHeight(500000.0),
+    _isGeocentric(true)
 {
     //nop.
 }
@@ -322,7 +323,6 @@ OverlayDecorator::onGroupChanged(osg::Group* group)
 
     for( unsigned i=0; i<_techniques.size(); ++i )
     {
-        //TODO: change to technique->getActive() or something
         _totalOverlayChildren += _overlayGroups[i]->getNumChildren();
 
         if ( _overlayGroups[i] == group )
@@ -367,11 +367,15 @@ OverlayDecorator::setTerrainEngine(TerrainEngineNode* engine)
     {
         _engine = engine;
 
-        // establish the earth's major axis:
-        MapInfo info(engine->getMap());
-        _isGeocentric = info.isGeocentric();
-        _srs = info.getProfile()->getSRS();
-        _ellipsoid = info.getProfile()->getSRS()->getEllipsoid();
+        if (engine->getMap()->getSRS() == 0L)
+        {
+            OE_WARN << LC << "ILLEGAL STATE: setTerrainEngine(), map SRS is not set" << std::endl;
+            return;
+        }   
+
+        _srs = engine->getMap()->getSRS();
+        _isGeocentric = _srs->isGeographic() || _srs->isGeocentric();
+        _ellipsoid = _srs->getEllipsoid();
 
         for(Techniques::iterator t = _techniques.begin(); t != _techniques.end(); ++t )
         {
@@ -428,7 +432,7 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
         hasl = osg::maximum( hasl, 100.0 );
 
         // up vector tangent to the ellipsoid under the eye.
-        worldUp = _ellipsoid->computeLocalUpVector(eye.x(), eye.y(), eye.z());
+        worldUp = _ellipsoid.geocentricToUpVector(eye);
 
         // radius of the earth under the eyepoint
         // gw: wrong. use R instead.
@@ -444,7 +448,9 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
 
         // there "horizon distance" in a projected map is infinity,
         // so just simulate one.
-        horizonDistance = sqrt(2.0*6356752.3142*hasl + hasl*hasl);
+        double Rp = _ellipsoid.getSemiMinorAxis();
+        horizonDistance = sqrt(2.0*Rp*hasl + hasl*hasl);
+        //horizonDistance = sqrt(2.0*6356752.3142*hasl + hasl * hasl);
     }
     
     // update the shared horizon distance.
@@ -490,7 +496,7 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
     cv->setCalculatedFarPlane( osg::maximum(zSavedFar, zFar) );
 
     // clamp the far plane (for RTT purposes) to the horizon distance.
-    double maxFar = std::min( horizonDistance, _maxHorizonDistance );
+    double maxFar = osg::minimum( horizonDistance, _maxHorizonDistance );
     cv->clampProjectionMatrix( projMatrix, zNear, maxFar );
 
     // prepare to calculate the ideal far plane for RTT extent resolution.
@@ -519,7 +525,7 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
     // clamp down the far plane:
     if ( maxDist2 != 0.0 )
     {
-        maxFar = std::min( zNear+sqrt(maxDist2), maxFar );
+        maxFar = osg::minimum( zNear+sqrt(maxDist2), maxFar );
     }
 
     // reset the projection matrix if we changed the far:
@@ -531,8 +537,7 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
     }
 
     // calculate the new RTT matrices. All techniques will share the 
-    // same set. We could probably put these in the "shared" category
-    // and use pointers..todo.
+    // same set.
     osg::Matrix rttViewMatrix, rttProjMatrix;
 
     // for a camera that cares about geometry (like the draping technique) it's important
@@ -543,37 +548,30 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
     // Proj matrix.
     
     osg::Vec3d up = camLook;
-    osg::Vec3d rttEye;
+    osg::Vec3d center;
 
     if ( _isGeocentric )
     {
-        osg::Vec3d center = eye;
+        center = eye;
         center.normalize();
         center *= R;
-        rttEye = center + worldUp*_maxHeight;
+        
         //establish a valid up vector
-        osg::Vec3d rttLook = -rttEye;
+        osg::Vec3d rttLook = -eye;
         rttLook.normalize();
         if ( fabs(rttLook * camLook) > 0.9999 )
             up.set( camUp );
-
-        // do NOT look at (0,0,0); must look down the ellipsoid up vector.
-        rttViewMatrix.makeLookAt( rttEye, center, up );
     }
     else
     {
-        osg::Vec3d center( camEye.x(), camEye.y(), 0.0 );
-        rttEye = center + worldUp*_maxHeight;
+        center.set( camEye.x(), camEye.y(), 0.0 );
 
         osg::Vec3d rttLook(0, 0, -1);
         if ( fabs(rttLook * camLook) > 0.9999 )
             up.set( camUp );
-
-        rttViewMatrix.makeLookAt( rttEye, center, up );
     }
 
     // Build a polyhedron for the new frustum so we can slice it.
-    // TODO: do we really even need to slice it anymore? consider
     osgShadow::ConvexPolyhedron frustumPH;
     frustumPH.setToUnitFrustum(true, true);
     frustumPH.transform( inverseMVP, MVP );
@@ -587,6 +585,19 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
         // skip empty techniques
         if ( !tech->hasData(params) )
             continue;
+
+        // calculate the view matrix differently depending on 
+        // whether the technique wants a constrained Z.
+        osg::Vec3d rttEye;
+        if (tech->constrainOrthoZ())
+        {
+            rttEye = center + worldUp * _maxHeight;
+        }
+        else
+        {
+            rttEye = eye;
+        }
+        rttViewMatrix.makeLookAt( rttEye, center, up );
 
         // slice it to fit the overlay geometry. (this says 'visible' but it's just everything..
         // perhaps we can truly make it visible)
@@ -657,9 +668,9 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
 #if 0
             // testing "lock to ortho viewport".
             bool lockToOrthoFrustum = false; // experimental
-            if ( lockToOrthoFrustum && osg::equivalent(projMatrix(3,3), 1.0) )
+            if ( lockToOrthoFrustum && ProjectionMatrix::isOrtho(projMatrix))
             {
-                projMatrix.getOrtho(xmin, xmax, ymin, ymax, orthoNear, orthoFar);
+                ProjectionMatrix::getOrtho(projMatrix, xmin, xmax, ymin, ymax, orthoNear, orthoFar);
             }
 
             else
@@ -675,7 +686,7 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
                 // This causes problems for the draping projection matrix optimizer, so
                 // for now instead of re-doing that code we will just center the eyepoint
                 // here by using the larger of xmin and xmax. -gw.                
-                double x = std::max( fabs(xmin), fabs(xmax) );
+                double x = osg::maximum( fabs(xmin), fabs(xmax) );
                 xmin = -x, xmax = x;
             }
 
@@ -686,7 +697,9 @@ OverlayDecorator::cullTerrainAndCalculateRTTParams(osgUtil::CullVisitor* cv,
             orthoNear = 0.0; // at the rtt camera
             orthoFar  = _isGeocentric ? rttLen : (rttLen + _maxHeight);
 
-            rttProjMatrix.makeOrtho(xmin, xmax, ymin, ymax, orthoNear, orthoFar);
+            ProjectionMatrix::setOrtho(rttProjMatrix, xmin, xmax, ymin, ymax, orthoNear, orthoFar,
+                ProjectionMatrix::getType(projMatrix));
+            //rttProjMatrix.makeOrtho(xmin, xmax, ymin, ymax, orthoNear, orthoFar);
 
 
             // Clamp the view frustum's N/F to the visible geometry. This clamped
@@ -879,6 +892,8 @@ OverlayDecorator::setMaxHorizonDistance( double horizonDistance )
 void
 OverlayDecorator::resizeGLObjectBuffers(unsigned maxSize)
 {
+    osg::Group::resizeGLObjectBuffers(maxSize);
+
     Threading::ScopedWriteLock lock(_perViewDataMutex);
 
     for(PerViewDataMap::iterator i = _perViewData.begin(); i != _perViewData.end(); ++i)
@@ -902,6 +917,8 @@ OverlayDecorator::resizeGLObjectBuffers(unsigned maxSize)
 void
 OverlayDecorator::releaseGLObjects(osg::State* state) const
 {
+    osg::Group::releaseGLObjects(state);
+
     Threading::ScopedWriteLock lock(_perViewDataMutex);
 
     for(PerViewDataMap::const_iterator i = _perViewData.begin(); i != _perViewData.end(); ++i)

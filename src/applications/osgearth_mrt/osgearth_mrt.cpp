@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -28,8 +28,8 @@
 #include <osgViewer/Viewer>
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/GLUtils>
-#include <osgEarthUtil/EarthManipulator>
-#include <osgEarthUtil/ExampleResources>
+#include <osgEarth/EarthManipulator>
+#include <osgEarth/ExampleResources>
 
 #define LC "[viewer] "
 
@@ -56,28 +56,35 @@ createMRTPass(App& app, osg::Node* sceneGraph)
     rtt->attach(osg::Camera::BufferComponent(osg::Camera::COLOR_BUFFER0), app.gcolor);
     rtt->attach(osg::Camera::BufferComponent(osg::Camera::COLOR_BUFFER1), app.gnormal);
     rtt->attach(osg::Camera::BufferComponent(osg::Camera::COLOR_BUFFER2), app.gdepth);
-    rtt->setCullingMode(rtt->getCullingMode() & ~osg::CullSettings::SMALL_FEATURE_CULLING); 
+    rtt->setCullingMode(rtt->getCullingMode() & ~osg::CullSettings::SMALL_FEATURE_CULLING);
 
-    static const char* vertSource =
-        "out float mrt_depth;\n"
-        "void oe_mrt_vertex(inout vec4 vertexClip)\n"
-        "{\n"
-        "    mrt_depth = (vertexClip.z/vertexClip.w)*0.5+1.0;\n"
-        "}\n";
+    static const char* vertSource = R"(
+        #version 330
+        out float mrt_depth;
+        void oe_mrt_vertex(inout vec4 vertexClip)
+        {
+            mrt_depth = (vertexClip.z/vertexClip.w)*0.5+1.0;
+        }
+    )";
 
-    static const char* fragSource =
-        "in float mrt_depth;\n"
-        "in vec3 vp_Normal; \n"
-        "void oe_mrt_fragment(inout vec4 color)\n"
-        "{\n"
-        "    gl_FragData[0] = color; \n"
-        "    gl_FragData[1] = vec4((vp_Normal+1.0)/2.0,1.0);\n"
-        "    gl_FragData[2] = vec4(mrt_depth,mrt_depth,mrt_depth,1.0); \n"
-        "}\n";
+    static const char* fragSource = R"(
+        #version 330
+        in float mrt_depth;
+        in vec3 vp_Normal;
+        layout(location=0) out vec4 gcolor;
+        layout(location=1) out vec4 gnormal;
+        layout(location=2) out vec4 gdepth;
+        void oe_mrt_fragment(inout vec4 color)
+        {
+            gcolor = color;
+            gnormal = vec4((vp_Normal+1.0)/2.0, 1.0);
+            gdepth = vec4(mrt_depth, mrt_depth, mrt_depth, 1.0);
+        }
+    )";
 
     VirtualProgram* vp = VirtualProgram::getOrCreate( rtt->getOrCreateStateSet() );
-    vp->setFunction( "oe_mrt_vertex",   vertSource, ShaderComp::LOCATION_VERTEX_CLIP );
-    vp->setFunction( "oe_mrt_fragment", fragSource, ShaderComp::LOCATION_FRAGMENT_OUTPUT );
+    vp->setFunction( "oe_mrt_vertex",   vertSource, VirtualProgram::LOCATION_VERTEX_CLIP );
+    vp->setFunction( "oe_mrt_fragment", fragSource, VirtualProgram::LOCATION_FRAGMENT_OUTPUT );
 
     rtt->addChild( sceneGraph );
     return rtt;
@@ -91,7 +98,7 @@ createFramebufferQuad(App& app)
 
     osg::Geometry* g = new osg::Geometry();
     g->setSupportsDisplayList( false );
-    
+
     osg::Vec3Array* v = new osg::Vec3Array();
     v->push_back(osg::Vec3(-w/2, -h/2, 0));
     v->push_back(osg::Vec3( w/2, -h/2, 0));
@@ -106,11 +113,14 @@ createFramebufferQuad(App& app)
     t->push_back(osg::Vec2(0,h));
     g->setTexCoordArray(0, t);
 
+    osg::DrawElementsUByte* i = new osg::DrawElementsUByte(GL_TRIANGLES);
+    i->addElement(0); i->addElement(1); i->addElement(3);
+    i->addElement(1); i->addElement(2); i->addElement(3);
+    g->addPrimitiveSet(i);
+
     osg::Vec4Array* c = new osg::Vec4Array(osg::Array::BIND_OVERALL);
     c->push_back(osg::Vec4(1,1,1,1));
     g->setColorArray(c);
-
-    g->addPrimitiveSet(new osg::DrawArrays(GL_QUADS, 0, 4));
 
     osg::Geode* geode = new osg::Geode();
     geode->addDrawable( g );
@@ -122,59 +132,63 @@ osg::Node*
 createFramebufferPass(App& app)
 {
     osg::Node* quad = createFramebufferQuad(app);
-    
+
     osg::StateSet* stateset = quad->getOrCreateStateSet();
 
-    static const char* vertSource =
-        "out vec4 texcoord;\n"
-        "void effect_vert(inout vec4 vertexView)\n"
-        "{\n"
-        "    texcoord = gl_MultiTexCoord0; \n"
-        "}\n";
+    static const char* vertSource = R"(
+        #version 330
+        out vec4 texcoord;
+        void effect_vert(inout vec4 vertexView)
+        {
+            texcoord = gl_MultiTexCoord0;
+        }
+    )";
 
     // fragment shader that performs edge detection and tints edges red.
-    static const char* fragSource =
-        "#version " GLSL_VERSION_STR "\n"
-        "#extension GL_ARB_texture_rectangle : enable\n"
-        "uniform sampler2DRect gcolor;\n"
-        "uniform sampler2DRect gnormal;\n"
-        "uniform sampler2DRect gdepth;\n"
-        "uniform float osg_FrameTime;\n"
-        "in vec4 texcoord;\n"
+    static const char* fragSource = R"(
+        #version 330
+        #extension GL_ARB_texture_rectangle : enable
+        uniform sampler2DRect gcolor;
+        uniform sampler2DRect gnormal;
+        uniform sampler2DRect gdepth;
+        uniform float osg_FrameTime;
+        in vec4 texcoord;
 
-        "void effect_frag(inout vec4 color)\n"
-        "{\n"
-        "    color = texture(gcolor, texcoord.st); \n"
-        "    float depth = texture(gdepth, texcoord.st).r; \n"
-        "    vec3 normal = texture(gnormal,texcoord.st).xyz *2.0-1.0; \n"
+        void effect_frag(inout vec4 color)
+        {
+            color = texture(gcolor, texcoord.st);
+            float depth = texture(gdepth, texcoord.st).r;
+            vec3 normal = texture(gnormal,texcoord.st).xyz *2.0-1.0;
 
-        // sample radius in pixels:
-        "    float e = 25.0 * sin(osg_FrameTime); \n"
+            // sample radius in pixels:
+            float e = 25.0 * sin(osg_FrameTime);
 
-        // sample the normals around our pixel and find the approximate
-        // deviation from our center normal:
-        "    vec3 avgNormal =\n"
-        "       texture(gnormal, texcoord.st+vec2( e, e)).xyz + \n"
-        "       texture(gnormal, texcoord.st+vec2(-e, e)).xyz + \n"
-        "       texture(gnormal, texcoord.st+vec2(-e,-e)).xyz + \n"
-        "       texture(gnormal, texcoord.st+vec2( e,-e)).xyz + \n"
-        "       texture(gnormal, texcoord.st+vec2( 0, e)).xyz + \n"
-        "       texture(gnormal, texcoord.st+vec2( e, 0)).xyz + \n"
-        "       texture(gnormal, texcoord.st+vec2( 0,-e)).xyz + \n"
-        "       texture(gnormal, texcoord.st+vec2(-e, 0)).xyz;  \n"
-        "    avgNormal = normalize((avgNormal/8.0)*2.0-1.0); \n"
+            // sample the normals around our pixel and find the approximate
+            // deviation from our center normal:
+            vec3 avgNormal =
+               texture(gnormal, texcoord.st+vec2( e, e)).xyz +
+               texture(gnormal, texcoord.st+vec2(-e, e)).xyz +
+               texture(gnormal, texcoord.st+vec2(-e,-e)).xyz +
+               texture(gnormal, texcoord.st+vec2( e,-e)).xyz +
+               texture(gnormal, texcoord.st+vec2( 0, e)).xyz +
+               texture(gnormal, texcoord.st+vec2( e, 0)).xyz +
+               texture(gnormal, texcoord.st+vec2( 0,-e)).xyz +
+               texture(gnormal, texcoord.st+vec2(-e, 0)).xyz;
 
-        // average deviation from normal:
-        "    float deviation = clamp(dot(normal, avgNormal),0.0,1.0); \n"
+            avgNormal = normalize((avgNormal/8.0)*2.0-1.0);
 
-        // use that to tint the pixel red:
-        "    e = 2.5 * (1.0-deviation); \n"
-        "    color.rgb = color.rgb + vec3(e,0,0);\n"
-        "}\n";
+            // average deviation from normal:
+            float deviation = clamp(dot(normal, avgNormal),0.0,1.0);
+
+            // use that to tint the pixel red:
+            e = 2.5 * (1.0-deviation);
+            color.rgb = color.rgb + vec3(e,0,0);
+        }
+    )";
 
     VirtualProgram* vp = VirtualProgram::getOrCreate(stateset);
-    vp->setFunction("effect_vert", vertSource, ShaderComp::LOCATION_VERTEX_VIEW);
-    vp->setFunction("effect_frag", fragSource, ShaderComp::LOCATION_FRAGMENT_COLORING);
+    vp->setFunction("effect_vert", vertSource, VirtualProgram::LOCATION_VERTEX_VIEW);
+    vp->setFunction("effect_frag", fragSource, VirtualProgram::LOCATION_FRAGMENT_COLORING);
 
     stateset->setTextureAttributeAndModes(0, app.gcolor, 1);
     stateset->addUniform(new osg::Uniform("gcolor", 0));
@@ -214,7 +228,7 @@ createRenderTargets(App& app, unsigned width, unsigned height)
 
     app.gdepth = new osg::TextureRectangle();
     app.gdepth->setTextureSize(width, height);
-    app.gdepth->setInternalFormat(GL_LUMINANCE);
+    app.gdepth->setInternalFormat(GL_R16F);
     app.gdepth->setFilter(osg::Texture2D::MIN_FILTER,osg::Texture2D::NEAREST);
     app.gdepth->setFilter(osg::Texture2D::MAG_FILTER,osg::Texture2D::NEAREST);
 }
@@ -223,7 +237,7 @@ createRenderTargets(App& app, unsigned width, unsigned height)
 int
 usage(const char* name)
 {
-    OE_NOTICE 
+    OE_NOTICE
         << "\nUsage: " << name << " file.earth" << std::endl
         << MapNodeHelper().usage() << std::endl;
 
@@ -248,7 +262,7 @@ struct RTTIntersectionTest : public osgGA::GUIEventHandler
             osg::Vec3d pf( nx, ny,  1 ); // on far plane
 
             OE_NOTICE << "clip: nx=" << nx << ", ny=" << ny << std::endl;
-            
+
             // take the view matrix as-is:
             osg::Matrix view = _view->getCamera()->getViewMatrix();
 
@@ -275,8 +289,8 @@ struct RTTIntersectionTest : public osgGA::GUIEventHandler
 
             lsi->setIntersectionLimit( lsi->LIMIT_NEAREST );
 
-            osgUtil::IntersectionVisitor iv( lsi ); 
-            
+            osgUtil::IntersectionVisitor iv( lsi );
+
             _node->accept( iv );
 
             if ( lsi->containsIntersections() )
@@ -292,14 +306,16 @@ struct RTTIntersectionTest : public osgGA::GUIEventHandler
 int
 main(int argc, char** argv)
 {
+    osgEarth::initialize();
+
     osg::ArgumentParser arguments(&argc,argv);
     osgViewer::Viewer viewer(arguments);
     viewer.setCameraManipulator( new EarthManipulator() );
 
     osg::Group* root = new osg::Group();
 
-    osg::Node* node = MapNodeHelper().load( arguments, &viewer );
-    if ( node )
+    auto node = MapNodeHelper().load( arguments, &viewer );
+    if ( node.valid() )
     {
         App app;
         createRenderTargets( app, 1280, 1024 );

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -22,22 +22,19 @@
 #include <osgEarth/Map>
 #include <osgEarth/MapNode>
 #include <osgEarth/NodeUtils>
-#include <osgEarthUtil/Controls>
-#include <osgEarthUtil/ExampleResources>
+#include <osgEarth/ExampleResources>
 
 #define LC "[SimpleSkyDriver] "
 
 using namespace osgEarth::Util;
-namespace ui = osgEarth::Util::Controls;
 
 namespace osgEarth { namespace SimpleSky
 {
     class SimpleSkyExtension : public Extension,
-                               public ExtensionInterface<MapNode>,
-                               public ExtensionInterface<osg::View>,
-                               public ExtensionInterface<ui::Control>,
-                               public SimpleSkyOptions,
-                               public SkyNodeFactory
+        public ExtensionInterface<MapNode>,
+        public ExtensionInterface<osg::View>,
+        public SimpleSkyOptions,
+        public SkyNodeFactory
     {
     public:
         META_OE_Extension(osgEarth, SimpleSkyExtension, simple_sky);
@@ -55,20 +52,20 @@ namespace osgEarth { namespace SimpleSky
 
     public: // ExtensionInterface<MapNode>
 
-        bool connect(MapNode* mapNode)
+        bool connect(MapNode* mapNode) override
         {
             _skynode = createSkyNode();
             if (mapNode->getMapSRS()->isProjected())
             {
-                GeoPoint refPoint;
-                mapNode->getMap()->getProfile()->getExtent().getCentroid(refPoint);
+                GeoPoint refPoint = 
+                    mapNode->getMap()->getProfile()->getExtent().getCentroid();
                 _skynode->setReferencePoint(refPoint);
             }                
             osgEarth::insertParent(_skynode.get(), mapNode);
             return true;
         }
 
-        bool disconnect(MapNode* mapNode)
+        bool disconnect(MapNode* mapNode) override
         {
             osgEarth::removeGroup(_skynode.get());
             _skynode = 0L;
@@ -77,7 +74,7 @@ namespace osgEarth { namespace SimpleSky
 
     public: // ExtensionInterface<osg::View>
 
-        bool connect(osg::View* view)
+        bool connect(osg::View* view) override
         {
             if (view && _skynode.valid())
             {
@@ -86,34 +83,15 @@ namespace osgEarth { namespace SimpleSky
             return true;
         }
 
-        bool disconnect(osg::View* view)
+        bool disconnect(osg::View* view) override
         {
             //todo
             return true;
         }
 
-
-    public: // ExtensionInterface<Control>
-
-        bool connect(ui::Control* control)
-        {
-            ui::Container* container = dynamic_cast<ui::Container*>(control);
-            if (container)
-                _ui = container->addControl(SkyControlFactory::create(_skynode.get()));
-            return true;
-        }
-
-        bool disconnect(ui::Control* control)
-        {
-            ui::Container* container = dynamic_cast<ui::Container*>(control);
-            if (container && _ui.valid())
-                container->removeChild(_ui.get());
-            return true;
-        }
-
     public: // SkyNodeFactory
 
-        SkyNode* createSkyNode() {
+        SkyNode* createSkyNode() override {
             return new SimpleSkyNode(*this);
         }
 
@@ -125,7 +103,6 @@ namespace osgEarth { namespace SimpleSky
 
 
     private:
-        osg::ref_ptr<ui::Control> _ui;
         osg::ref_ptr<SkyNode> _skynode;
     };
 

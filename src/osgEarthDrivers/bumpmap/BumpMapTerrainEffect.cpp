@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2012 Pelican Mapping
 * http://osgearth.org
 *
@@ -37,17 +37,24 @@ using namespace osgEarth;
 using namespace osgEarth::BumpMap;
 
 
-BumpMapTerrainEffect::BumpMapTerrainEffect(const osgDB::Options* dbOptions) :
-_ok(true),
-_bumpMapUnit(-1)
+BumpMapTerrainEffect::BumpMapTerrainEffect()
 {
     BumpMapOptions defaults;
     _octaves = defaults.octaves().get();
     _maxRange = defaults.maxRange().get();
     _baseLOD  = defaults.baseLOD().get();
 
-    _scaleUniform     = new osg::Uniform("oe_bumpmap_scale", defaults.scale().get());
+    _scaleUniform = new osg::Uniform("oe_bumpmap_scale", defaults.scale().get());
     _intensityUniform = new osg::Uniform("oe_bumpmap_intensity", defaults.intensity().get());
+    _octavesUniform = new osg::Uniform("oe_bumpmap_octaves", defaults.octaves().get());
+}
+
+BumpMapTerrainEffect::~BumpMapTerrainEffect()
+{
+    if (_bumpMapTex.valid())
+    {
+        _bumpMapTex->releaseGLObjects(nullptr);
+    }
 }
 
 void
@@ -61,7 +68,7 @@ BumpMapTerrainEffect::setBumpMapImage(osg::Image* image)
         _bumpMapTex->setFilter(osg::Texture::MIN_FILTER, osg::Texture::LINEAR);
         _bumpMapTex->setFilter(osg::Texture::MAG_FILTER, osg::Texture::LINEAR);
         _bumpMapTex->setMaxAnisotropy(1.0f);
-        _bumpMapTex->setUnRefImageDataAfterApply(true);
+        _bumpMapTex->setUnRefImageDataAfterApply(Registry::instance()->unRefImageDataAfterApply().get());
         _bumpMapTex->setResizeNonPowerOfTwoHint(false);
     }
     else
@@ -96,8 +103,8 @@ BumpMapTerrainEffect::onInstall(TerrainEngineNode* engine)
             package.load( vp, package.VertexView );
             package.load( vp, _octaves <= 1? package.FragmentSimple : package.FragmentProgressive );
 
-            if ( _octaves > 1 )
-                stateset->addUniform(new osg::Uniform("oe_bumpmap_octaves", _octaves));
+            stateset->addUniform(_octavesUniform);
+            _octavesUniform->set(_octaves);
 
             stateset->addUniform(new osg::Uniform("oe_bumpmap_maxRange", _maxRange));
             stateset->addUniform(new osg::Uniform("oe_bumpmap_slopeFactor", 1.0f));
@@ -123,11 +130,13 @@ BumpMapTerrainEffect::onUninstall(TerrainEngineNode* engine)
         if ( _bumpMapTex.valid() )
         {
             stateset->removeUniform("oe_bumpmap_maxRange");
-            stateset->removeUniform("oe_bumpmap_octaves");
-            stateset->removeUniform( _scaleUniform.get() );
-            stateset->removeUniform( _intensityUniform.get() );
-            stateset->removeUniform( _bumpMapTexUniform.get() );
-            stateset->removeTextureAttribute( _bumpMapUnit, osg::StateAttribute::TEXTURE );
+            stateset->removeUniform(_octavesUniform.get());
+            stateset->removeUniform(_scaleUniform.get());
+            stateset->removeUniform(_intensityUniform.get());
+            stateset->removeUniform(_bumpMapTexUniform.get());
+            stateset->removeTextureAttribute(_bumpMapUnit, osg::StateAttribute::TEXTURE);
+
+            _bumpMapTex->releaseGLObjects(nullptr);
         }
 
         VirtualProgram* vp = VirtualProgram::get(stateset);
@@ -143,4 +152,13 @@ BumpMapTerrainEffect::onUninstall(TerrainEngineNode* engine)
         engine->getResources()->releaseTextureImageUnit( _bumpMapUnit );
         _bumpMapUnit = -1;
     }
+}
+
+void
+BumpMapTerrainEffect::setActive(bool value)
+{
+    if (value)
+        _octavesUniform->set(_octaves);
+    else
+        _octavesUniform->set(0);
 }

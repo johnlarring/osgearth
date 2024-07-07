@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -22,8 +22,10 @@
 #include <osgEarth/ClampingTechnique>
 #include <osgEarth/Capabilities>
 #include <osgEarth/CullingUtils>
+#include <osgEarth/Notify>
 #include <osgEarth/Registry>
 #include <osgEarth/Shaders>
+#include <osgEarth/CameraUtils>
 
 #include <osg/Depth>
 #include <osg/PolygonMode>
@@ -39,7 +41,10 @@
 
 //#define TIME_RTT_CAMERA 1
 
+//#define SUPPORT_Z
+
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 //---------------------------------------------------------------------------
 
@@ -81,8 +86,9 @@ namespace
         unsigned _renderLeafCount;
 
         META_Object(osgEarth,LocalPerViewData);
-        LocalPerViewData() { }
-        LocalPerViewData(const LocalPerViewData& rhs, const osg::CopyOp& co) { }
+        LocalPerViewData() : _renderLeafCount(0) { }
+        LocalPerViewData(const LocalPerViewData& rhs, const osg::CopyOp& co) 
+           : _renderLeafCount(0) { }
         
         void resizeGLObjectBuffers(unsigned maxSize) {
             if (_rttTexture.valid())
@@ -213,17 +219,16 @@ ClampingTechnique::setUpCamera(OverlayDecorator::TechRTTParams& params)
         osg::Uniform::FLOAT_MAT4);
 
     // We use this define to tell the terrain it's a depth-only camera
-    rttStateSet->setDefine("OE_IS_DEPTH_CAMERA");
+    CameraUtils::setIsDepthCamera(params._rttCamera.get());
 
     // install a VP on the stateset that cancels out any higher-up VP code.
     // This will prevent things like VPs on the main camera (e.g., log depth buffer)
     // from interfering with the depth camera
     VirtualProgram* rttVP = VirtualProgram::getOrCreate(rttStateSet);
-    rttVP->setName("GPU Clamping RTT");
+    rttVP->setName(typeid(*this).name());
     rttVP->setInheritShaders(false);
     
     // attach the terrain to the camera.
-    // todo: should probably protect this with a mutex.....
     params._rttCamera->addChild( _engine ); // the terrain itself.
 
     // assemble the overlay graph stateset.
@@ -289,7 +294,7 @@ ClampingTechnique::setUpCamera(OverlayDecorator::TechRTTParams& params)
 
     // make the shader that will do clamping and depth offsetting.
     VirtualProgram* vp = VirtualProgram::getOrCreate(local->_groupStateSet.get());
-    vp->setName( "GPUClamping" );
+    vp->setName(typeid(*this).name());
 
     // Bind clamping attribute location, and a default uniform indicating whether
     // they are available (default is false).
@@ -300,8 +305,7 @@ ClampingTechnique::setUpCamera(OverlayDecorator::TechRTTParams& params)
     vp->addBindAttribLocation( Clamping::HeightsAttrName, Clamping::HeightsAttrLocation );
 
     osgEarth::Shaders pkg;
-    pkg.load(vp, pkg.GPUClampingVertex);
-    pkg.load(vp, pkg.GPUClampingFragment);
+    pkg.load(vp, pkg.GPUClamping);
 }
 
 
@@ -375,7 +379,7 @@ ClampingTechnique::cullOverlayGroup(OverlayDecorator::TechRTTParams& params,
 
         //OE_NOTICE << "HD = " << std::setprecision(8) << float(*params._horizonDistance) << std::endl;
 
-#if SUPPORT_Z
+#ifdef SUPPORT_Z
         osg::Matrix depthClipToDepthView;
         depthClipToDepthView.invert( depthViewToDepthClip );
         local._depthClipToDepthViewUniform->set( depthClipToDepthView );

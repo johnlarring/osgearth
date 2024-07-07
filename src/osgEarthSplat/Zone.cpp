@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -17,7 +17,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
 #include "Zone"
-#include <osgEarth/TraversalData>
 #include <osgUtil/CullVisitor>
 
 #define LC "[Zone] "
@@ -63,7 +62,7 @@ Zone::configure(const Map* map, const osgDB::Options* readOptions)
 
         // this only needs to be very approximate.
         double meanRadius = extent.getSRS()->isGeographic() ?
-            extent.getSRS()->getEllipsoid()->getRadiusEquator() : 0.0;
+            extent.getSRS()->getEllipsoid().getRadiusEquator() : 0.0;
         b.meanRadius2 = meanRadius*meanRadius;
     }
     
@@ -78,24 +77,6 @@ Zone::configure(const Map* map, const osgDB::Options* readOptions)
         {
             OE_WARN << LC << "Surface data is not properly configured; surface splatting disabled.\n";
             _surface = 0L;
-        }
-    }
-
-    if( _options.groundCover().isSet() )
-    {
-        _groundCover = new GroundCover(_options.groundCover().get());
-    }
-
-    if (_groundCover.valid())
-    {
-        if (_groundCover->configure(readOptions))
-        {
-            OE_DEBUG << LC << "Configured land cover group \"" << _groundCover->getName() << "\"\n";
-        }
-        else
-        {
-            OE_WARN << LC << "Land cover group is improperly configured\n";
-            return false;
         }
     }
 
@@ -125,13 +106,19 @@ Zone::contains(const osg::Vec3& point) const
     return false;
 }
 
-//osg::StateSet*
-//Zone::getOrCreateStateSet() 
-//{
-//    if ( !_stateSet.valid() )
-//        _stateSet = new osg::StateSet();
-//    return _stateSet.get();
-//}
+void
+Zone::resizeGLObjectBuffers(unsigned maxSize)
+{
+    if (_surface.valid())
+        _surface->resizeGLObjectBuffers(maxSize);
+}
+
+void
+Zone::releaseGLObjects(osg::State* state) const
+{
+    if (_surface.valid())
+        _surface->releaseGLObjects(state);
+}
 
 //........................................................................
 
@@ -148,7 +135,6 @@ ZoneOptions::fromConfig(const Config& conf)
         }
     }
     conf.get( "surface",     _surface );
-    conf.get( "groundcover", _groundCover);
 }
 
 Config
@@ -171,62 +157,6 @@ ZoneOptions::getConfig() const
         conf.set(regions);
     }
     conf.set( "surface",     _surface );
-    conf.set( "groundcover", _groundCover );
     return conf;
 }
 
-void
-ZoneSwitcher::operator()(osg::Node* node, osg::NodeVisitor* nv)
-{
-#if 0
-    osg::StateSet* stateset = 0L;
-    
-    Zone* finalZone = 0L;
-
-    if ( _zones.size() > 0 )
-    {
-        osg::Vec3d vp = nv->getViewPoint();
-        double z2 = vp.length2();
-
-        unsigned zoneIndex = 0;
-        unsigned finalZoneIndex = ~0;
-
-        for(unsigned z=0; z<_zones.size() && !stateset; ++z)
-        {
-            if ( _zones[z]->contains(vp) )
-            {
-                stateset = _zones[z]->getStateSet();
-                finalZoneIndex = zoneIndex;
-                finalZone = _zones[z].get();
-            }
-            if ( _zones[z]->getGroundCover() )
-            {
-                zoneIndex++;
-            }
-        }
-
-        if ( !stateset )
-        {
-            stateset = _zones[0]->getStateSet();
-            finalZoneIndex = 0;
-        }                
-        
-        // Relays the zone to the GroundCoverPatchLayer.
-        //VisitorData::store(*nv, "oe.GroundCover.zoneIndex", new RefUID(finalZoneIndex));
-        VisitorData::store(*nv, "oe.GroundCover.zone", finalZone );
-    }
-
-    if ( stateset )
-        static_cast<osgUtil::CullVisitor*>(nv)->pushStateSet( stateset );
-
-    traverse(node, nv);
-
-    if ( stateset )
-        static_cast<osgUtil::CullVisitor*>(nv)->popStateSet();
-
-    if (finalZone)
-    {
-        VisitorData::remove(*nv, "oe.GroundCover.zone");
-    }
-#endif
-}

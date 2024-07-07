@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
  * Copyright 2008-2014 Pelican Mapping
  * http://osgearth.org
  *
@@ -22,6 +22,7 @@
 #include "EngineContext"
 #include "TerrainRenderData"
 #include "SelectionInfo"
+#include <osgEarth/Containers>
 
 #include <osg/NodeVisitor>
 #include <osgUtil/CullVisitor>
@@ -29,15 +30,16 @@
 
 using namespace osgEarth;
 
-namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
+namespace osgEarth { namespace REX
 {
     struct LayerExtent
     {
-        LayerExtent() : _computed(false) { }
-        bool _computed;
+        LayerExtent() : _revision(-1) { }
+        osg::observer_ptr<const Layer> _layer;
+        Revision _revision;
         GeoExtent _extent;
     };
-    typedef std::vector<LayerExtent> LayerExtentVector;
+    using LayerExtentMap = std::unordered_map<UID, LayerExtent>;
 
     /**
      * Node visitor responsible for assembling a TerrainRenderData that 
@@ -46,21 +48,29 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
     class TerrainCuller : public osg::NodeVisitor, public osg::CullStack
     {
     public:
-        TerrainRenderData _terrain;
+        osgUtil::CullVisitor* _cv;
         EngineContext* _context;
         osg::Camera* _camera;
         TileNode* _currentTileNode;
         DrawTileCommand* _firstDrawCommandForTile;
         unsigned _orphanedPassesDetected;
-        osgUtil::CullVisitor* _cv;
-        LayerExtentVector* _layerExtents;
+        LayerExtentMap* _layerExtents;
+        bool _isSpy;
+        std::vector<PatchLayer*> _patchLayers;
+        double _lastTimeVisited;
+        bool _acceptSurfaceNodes;
+        TerrainRenderData _terrain;
 
     public:
-        /** A new terrain culler */
-        TerrainCuller(osgUtil::CullVisitor* cullVisitor, EngineContext* context);
+        //! Construct the culler
+        TerrainCuller();
 
-        /** Initialize the culler with a map and a set of render bindings. */
-        void setup(const Map* map, LayerExtentVector& layerExtents, const RenderBindings& bindings);
+        //! Reset for the next frame
+        void reset(
+            osgUtil::CullVisitor* parentCullVisitor,
+            TerrainRenderData::PersistentData& pd,
+            EngineContext* context,
+            LayerExtentMap& layerExtents);
 
         /** The active camera */
         osg::Camera* getCamera() { return _camera; }
@@ -71,8 +81,14 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
         /** The CullVIsitor that parents this culler. */
         osgUtil::CullVisitor& getParent() { return *_cv; }
 
+        bool isCulledToBBox(osg::Transform* node, const osg::BoundingBox& box);
+
+        void removeLayer(const Layer* layer);
+
     public: // osg::NodeVisitor
         void apply(osg::Node& node);
+        void apply(TileNode& node);
+        void apply(SurfaceNode& node);
         
         float getDistanceToViewPoint(const osg::Vec3& pos, bool withLODScale) const;
 
@@ -86,6 +102,6 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
 
     };
 
-} } } // namespace 
+} } // namespace 
 
 #endif // OSGEARTH_REX_TERRAIN_CULLER_H

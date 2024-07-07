@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -22,8 +22,10 @@
 #include <osgEarth/Capabilities>
 #include <osgEarth/CullingUtils>
 #include <osgEarth/GLSLChunker>
+#include <osg/Texture2D>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 //------------------------------------------------------------------------
 
@@ -124,10 +126,14 @@ namespace
         return yes;
     }
 
-    int replaceVarying(GLSLChunker::Chunks& chunks, int index, const StringVector& tokens, int offset, const std::string& prefix)
+    int replaceVarying(GLSLChunker::Chunks& chunks, int index, const StringVector& tokens, int offset, const std::string& prefix, bool isInput)
     {
         std::stringstream buf;
-        buf << "#pragma vp_varying";
+        if (isInput)
+            buf << "#pragma vp_varying_in";
+        else
+            buf << "#pragma vp_varying_out";
+
         if ( !prefix.empty() )
             buf << " " << prefix;
 
@@ -173,18 +179,24 @@ namespace
                 */
                 const std::vector<std::string>& tokens = chunks[i].tokens;
 
+                // Note:
+                // "in"s are ignored for vertex shaders, since their ins are not varyings but
+                // rather input attributes.
+                // BUT, if there is a GS in the mix, and vertex shaders get moved into the GS,
+                // this will fail. Figure this out someday. -gw
+
                 if      ( tokens.size() > 1 && tokens[0] == "out" && type != osg::Shader::FRAGMENT )
-                    i = replaceVarying(chunks, i, tokens, 1, ""), madeChanges = true;
+                    i = replaceVarying(chunks, i, tokens, 1, "", false), madeChanges = true;
                 else if ( tokens.size() > 1 && tokens[0] == "in" && type != osg::Shader::VERTEX )
-                    i = replaceVarying(chunks, i, tokens, 1, ""), madeChanges = true;
+                    i = replaceVarying(chunks, i, tokens, 1, "", true), madeChanges = true;
                 else if ( tokens.size() > 2 && tokens[0] == "varying" && tokens[1] == "out" && type != osg::Shader::FRAGMENT )
-                    i = replaceVarying(chunks, i, tokens, 2, ""), madeChanges = true;
+                    i = replaceVarying(chunks, i, tokens, 2, "", false), madeChanges = true;
                 else if ( tokens.size() > 2 && tokens[0] == "flat" && tokens[1] == "out" && type != osg::Shader::FRAGMENT )
-                    i = replaceVarying(chunks, i, tokens, 2, "flat"), madeChanges = true;
+                    i = replaceVarying(chunks, i, tokens, 2, "flat", false), madeChanges = true;
                 else if ( tokens.size() > 2 && tokens[0] == "flat" && tokens[1] == "in" && type != osg::Shader::VERTEX )
-                    i = replaceVarying(chunks, i, tokens, 2, "flat"), madeChanges = true;
+                    i = replaceVarying(chunks, i, tokens, 2, "flat", true), madeChanges = true;
                 else if ( tokens.size() > 1 && tokens[0] == "varying" )
-                    i = replaceVarying(chunks, i, tokens, 1, ""), madeChanges = true;
+                    i = replaceVarying(chunks, i, tokens, 1, "", true), madeChanges = true;
             }
         }
 
@@ -228,6 +240,7 @@ namespace
     }
 }
 
+#if 0
 void
 ShaderPreProcessor::applySupportForNoFFP(osg::Shader* shader)
 {
@@ -248,13 +261,38 @@ ShaderPreProcessor::applySupportForNoFFP(osg::Shader* shader)
 
 #endif // !defined(OSG_GL_FIXED_FUNCTION_AVAILABLE)
 }
+#endif
+
+std::unordered_map<UID, ShaderPreProcessor::PreCallbackInfo> ShaderPreProcessor::_pre_callbacks;
+std::unordered_map<UID, ShaderPreProcessor::PostCallbackInfo> ShaderPreProcessor::_post_callbacks;
 
 void
-ShaderPreProcessor::run(osg::Shader* shader)
+ShaderPreProcessor::runPre(std::string& source)
+{
+    for (auto& callback : _pre_callbacks)
+    {
+        osg::ref_ptr<osg::Referenced> host_safe;
+        callback.second.host.lock(host_safe);
+        if (host_safe.valid())
+            callback.second.function(source, host_safe.get());
+    }
+}
+
+void
+ShaderPreProcessor::runPost(osg::Shader* shader)
 {
     if ( shader )
     {
         bool dirty = false;
+
+        // Run post-callbacks
+        for (auto& callback : _post_callbacks)
+        {
+            osg::ref_ptr<osg::Referenced> host_safe;
+            callback.second.host.lock(host_safe);
+            if (host_safe.valid())
+                callback.second.function(shader, host_safe.get());
+        }
 
         std::string source = shader->getShaderSource();
 
@@ -269,11 +307,11 @@ ShaderPreProcessor::run(osg::Shader* shader)
         GLSLChunker chunker;
         GLSLChunker::Chunks chunks;
         chunker.read( source, chunks );
-
+        
 
         if (shader->getType() != osg::Shader::FRAGMENT)
         {
-            applySupportForNoFFPImpl(chunks);
+            //applySupportForNoFFPImpl(chunks);
         }
 
         // Replace varyings with directives that the ShaderFactory can interpret
@@ -355,7 +393,7 @@ ArrayUniform::setElement( unsigned index, float value )
 }
 
 void
-ArrayUniform::setElement( unsigned index, const osg::Matrix& value )
+ArrayUniform::setElement( unsigned index, const osg::Matrixf& value )
 {
     if ( isValid() )
     {
@@ -366,13 +404,24 @@ ArrayUniform::setElement( unsigned index, const osg::Matrix& value )
 }
 
 void
-ArrayUniform::setElement( unsigned index, const osg::Vec3& value )
+ArrayUniform::setElement( unsigned index, const osg::Vec3f& value )
 {
     if ( isValid() )
     {
         ensureCapacity( index+1 );
         _uniform->setElement( index, value );
         _uniformAlt->setElement( index, value );
+    }
+}
+
+void
+ArrayUniform::setElement(unsigned index, const osg::Vec4f& value)
+{
+    if (isValid())
+    {
+        ensureCapacity(index + 1);
+        _uniform->setElement(index, value);
+        _uniformAlt->setElement(index, value);
     }
 }
 
@@ -401,17 +450,34 @@ ArrayUniform::getElement( unsigned index, float& out_value ) const
 }
 
 bool 
-ArrayUniform::getElement( unsigned index, osg::Matrix& out_value ) const
+ArrayUniform::getElement( unsigned index, osg::Matrixf& out_value ) const
 {
     return isValid() ? _uniform->getElement( index, out_value ) : false;
 }
 
 bool 
-ArrayUniform::getElement( unsigned index, osg::Vec3& out_value ) const
+ArrayUniform::getElement( unsigned index, osg::Vec3f& out_value ) const
 {
     return isValid() ? _uniform->getElement( index, out_value ) : false;
 }
 
+bool
+ArrayUniform::getElement(unsigned index, osg::Vec4f& out_value) const
+{
+    return isValid() ? _uniform->getElement(index, out_value) : false;
+}
+
+namespace
+{
+    template<typename T>
+    void copyElements(osg::Uniform* src, ArrayUniform* dest) {
+        for (unsigned i = 0; i < src->getNumElements(); ++i) {
+            T temp;
+            src->getElement(i, temp);
+            dest->setElement(i, temp);
+        }
+    };
+}
 
 void
 ArrayUniform::ensureCapacity( unsigned newSize )
@@ -421,8 +487,8 @@ ArrayUniform::ensureCapacity( unsigned newSize )
         osg::ref_ptr<osg::StateSet> stateSet_safe = _stateSet.get();
         if ( stateSet_safe.valid() )
         {
-            osg::ref_ptr<osg::Uniform> _oldUniform    = _uniform.get();
-            osg::ref_ptr<osg::Uniform> _oldUniformAlt = _oldUniform.get();
+            osg::ref_ptr<osg::Uniform> oldUniform = _uniform.get();
+            osg::ref_ptr<osg::Uniform> oldUniformAlt = _uniformAlt.get();
 
             stateSet_safe->removeUniform( _uniform->getName() );
             stateSet_safe->removeUniform( _uniformAlt->getName() );
@@ -430,41 +496,23 @@ ArrayUniform::ensureCapacity( unsigned newSize )
             _uniform    = new osg::Uniform( _uniform->getType(), _uniform->getName(), newSize );
             _uniformAlt = new osg::Uniform( _uniform->getType(), _uniform->getName() + "[0]", newSize );
 
-            switch( _oldUniform->getInternalArrayType(_oldUniform->getType()) )
+            switch (oldUniform->getType())
             {
-            case GL_FLOAT:
-              {
-                for( unsigned i = 0; i < _oldUniform->getNumElements(); ++i )
-                {
-                  float value;
-                  _oldUniform->getElement(i, value);
-                  setElement( i, value );
-                }
-              }
-              break;
-
-            case GL_INT:
-              {
-                for( unsigned i = 0; i < _oldUniform->getNumElements(); ++i )
-                {
-                  int value;
-                  _oldUniform->getElement(i, value);
-                  setElement( i, value );
-                }
-              }
-              break;
-
-            case GL_UNSIGNED_INT:
-              {
-                for( unsigned i = 0; i < _oldUniform->getNumElements(); ++i )
-                {
-                  unsigned value;
-                  _oldUniform->getElement(i, value);
-                  setElement( i, value );
-                }
-              }
-              break;
-            }
+            case osg::Uniform::FLOAT:
+                copyElements<float>(oldUniform.get(), this); break;
+            case osg::Uniform::INT:
+                copyElements<int>(oldUniform.get(), this); break;
+            case osg::Uniform::UNSIGNED_INT:
+                copyElements<unsigned>(oldUniform.get(), this); break;
+            case osg::Uniform::FLOAT_VEC3:
+                copyElements<osg::Vec3f>(oldUniform.get(), this); break;
+            case osg::Uniform::FLOAT_VEC4:
+                copyElements<osg::Vec4f>(oldUniform.get(), this); break;
+            case osg::Uniform::FLOAT_MAT4:
+                copyElements<osg::Matrixf>(oldUniform.get(), this); break;
+            case osg::Uniform::BOOL:
+                copyElements<bool>(oldUniform.get(), this); break;
+            };
 
             stateSet_safe->addUniform( _uniform.get() );
             stateSet_safe->addUniform( _uniformAlt.get() );
@@ -543,8 +591,6 @@ DiscardAlphaFragments::install(osg::StateSet* ss, float minAlpha) const
             vp->setName("Discard Alpha");
 
             std::string code = Stringify()
-                << "#version " << GLSL_VERSION_STR << "\n"
-                << GLSL_DEFAULT_PRECISION_FLOAT << "\n"
                 << "void oe_discardalpha_frag(inout vec4 color) { \n"
                 << "    if ( color.a < " << std::setprecision(1) << minAlpha << ") discard;\n"
                 << "} \n";
@@ -552,7 +598,7 @@ DiscardAlphaFragments::install(osg::StateSet* ss, float minAlpha) const
             vp->setFunction(
                 "oe_discardalpha_frag",
                 code,
-                ShaderComp::LOCATION_FRAGMENT_COLORING,
+                VirtualProgram::LOCATION_FRAGMENT_COLORING,
                 0L, 0.95f);
         }
     }
@@ -567,6 +613,137 @@ DiscardAlphaFragments::uninstall(osg::StateSet* ss) const
         if ( vp )
         {
             vp->removeShader("oe_discardalpha_frag");
+        }
+    }
+}
+
+
+namespace
+{
+    const char* fs =
+        "void oe_default_fs(inout vec4 color) { } \n";
+}
+
+void
+ShaderUtils::installDefaultShader(osg::StateSet* ss)
+{
+    VirtualProgram* vp = VirtualProgram::getOrCreate(ss);
+    vp->setFunction("oe_default_fs", fs, VirtualProgram::LOCATION_FRAGMENT_COLORING, 0.0);
+}
+
+
+ShaderInfoLog::ShaderInfoLog(
+    const osg::Program* program,
+    const std::string& log) :
+    _program(program),
+    _log(log)
+{
+
+}
+
+namespace
+{
+    void parse_glsl_message(
+        const std::string& input,
+        const std::vector<std::string>& source,
+        //        const std::string& source,
+        unsigned& out_lineno,
+        bool& out_isError,
+        std::string& out_message)
+    {
+        // example:
+        // 9602(22) : error C1121: index: function declaration in non global scope not allowed
+        // filename(lineno) : type code : message
+
+        // parse the message:
+        int filename;
+        int lineno;
+        char type[16];
+        char code[16];
+        char text[1024];
+
+        sscanf(input.c_str(), "%d(%d) : %s %s : %s",
+            &filename,
+            &lineno,
+            type,
+            code,
+            text);
+
+        // if the filename is not 0, find the corresponding #line directive
+        // and count from there.
+        if (filename != 0)
+        {
+            bool done = false;
+            for (unsigned n = 0; n < source.size() && !done; ++n)
+            {
+                std::string line(Strings::trim(source[n]));
+                if (Strings::startsWith(line, "#line"))
+                {
+                    int sub_lineno, sub_filename;
+                    sscanf(line.c_str(), "#line %d %d", &sub_lineno, &sub_filename);
+                    if (sub_filename == filename)
+                    {
+                        lineno = n - sub_lineno + lineno;
+                        done = true;
+                    }
+                }
+            }
+        }
+
+        out_lineno = lineno;
+        out_isError = (std::string(type) == "error");
+        out_message = text;
+    }
+}
+
+void
+ShaderInfoLog::dumpErrors(
+    osg::State& state) const
+{
+    bool done = false;
+    for (auto i = 0u; i < _program->getNumShaders() && !done; ++i)
+    {
+        auto shader = _program->getShader(i);
+        auto pshader = shader->getPCS(state);
+        std::string log;
+        pshader->getInfoLog(log);
+
+        // split into lines:
+        std::vector<std::string> errors;
+        StringTokenizer(log, errors, "\n", "", false, true);
+
+        // split into lines:
+        std::vector<std::string> lines;
+        StringTokenizer(shader->getShaderSource(), lines, "\n", "", false, false);
+
+        // keep track of same lines (in order)
+        std::stringstream buf;
+        for (int e = 0; e < errors.size() && !done; ++e)
+        {
+            unsigned lineno;
+            bool isError;
+            std::string text;
+
+            parse_glsl_message(errors[e], lines, lineno, isError, text);
+            if (isError)
+            {
+                int start = 0; // std::max(0, n - 3);
+                int end = lines.size(); // std::min((int)lines.size(), n + 7);
+                for (int k = start; k < end; ++k)
+                {
+                    std::string star = (k == lineno) ? "**> " : ":   ";
+                    buf << k << star << lines[k] << std::endl;
+                }
+
+                // just print the first error.
+                done = true;
+            }
+        }
+        std::string msg = buf.str();
+        if (!msg.empty())
+        {
+            OE_WARN << "SHADER " << shader->getName() << " infolog errors: " << std::endl
+                << msg << std::endl;
         }
     }
 }

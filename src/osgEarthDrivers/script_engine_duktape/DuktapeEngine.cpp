@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -20,19 +20,14 @@
 #include "JSGeometry"
 #include <osgEarth/JsonUtils>
 #include <osgEarth/StringUtils>
-#include <osgEarthFeatures/GeometryUtils>
+#include <osgEarth/GeometryUtils>
+#include <osgEarth/Metrics>
 #include <sstream>
 
 #undef  LC
-#define LC "[duktape] "
-
-// defining this will setup and tear down a complete duktape heap/context
-// for each and every invocation. Good for testing memory usage until we
-// complete the feature set.
-//#define MAXIMUM_ISOLATION
+#define LC "[JavaScript] "
 
 using namespace osgEarth;
-using namespace osgEarth::Features;
 using namespace osgEarth::Drivers::Duktape;
 
 //............................................................................
@@ -62,7 +57,7 @@ namespace
         Feature* feature = reinterpret_cast<Feature*>(duk_require_pointer(ctx, 0));
 
         // Fetch the feature data:
-        duk_push_global_object(ctx);                    
+        duk_push_global_object(ctx);
         // [ptr, global]
 
         if ( !duk_get_prop_string(ctx, -1, "feature") || !duk_is_object(ctx, -1))
@@ -73,8 +68,8 @@ namespace
         if ( duk_get_prop_string(ctx, -1, "properties") && duk_is_object(ctx, -1) )
         {
             // [ptr, global, feature, props]
-            duk_enum(ctx, -1, 0);                       
-        
+            duk_enum(ctx, -1, 0);
+
             // [ptr, global, feature, props, enum]
             while( duk_next(ctx, -1, 1/*get_value=true*/) )
             {
@@ -89,7 +84,7 @@ namespace
                 }
                 else if (duk_is_boolean(ctx, -1))
                 {
-                    feature->set( key, duk_get_boolean(ctx, -1) );
+                    feature->set( key, duk_get_boolean(ctx, -1) != 0 );
                 }
                 else if( duk_is_null_or_undefined( ctx, -1 ) )
                 {
@@ -108,23 +103,29 @@ namespace
         }
 
         // save the geometry, if set:
-        if ( duk_get_prop_string(ctx, -1, "geometry")&& duk_is_object(ctx, -1) )
+        if ( duk_get_prop_string(ctx, -1, "geometry") )
         {
-            // [ptr, global, feature, geometry]
-            std::string json( duk_json_encode(ctx, -1) ); // [ptr, global, feature, json]
-            Geometry* newGeom = GeometryUtils::geometryFromGeoJSON(json);
-            if ( newGeom )
+            if (duk_is_object(ctx, -1))
             {
-                feature->setGeometry( newGeom );
+                // [ptr, global, feature, geometry]
+                std::string json( duk_json_encode(ctx, -1) ); // [ptr, global, feature, json]
+                Geometry* newGeom = GeometryUtils::geometryFromGeoJSON(json);
+                if ( newGeom )
+                {
+                    feature->setGeometry( newGeom );
+                }
+                duk_pop(ctx); // [ptr, global, feature]
             }
-            duk_pop(ctx);
-            // [ptr, global, feature]
+            else
+            {
+                feature->setGeometry(nullptr);
+            }
         }
         else
         {
             // [ptr, global, feature, undefined]
         }
-        
+
         // [ptr, global, feature]
         duk_pop_2(ctx);     // [ptr] (as we found it)
         return 0;           // no return values.
@@ -138,7 +139,12 @@ namespace
     // Create a "feature" object in the global namespace.
     void setFeature(duk_context* ctx, Feature const* feature, bool complete)
     {
-        duk_push_global_object(ctx);                             // [global]
+        if (!feature)
+            return;
+
+        OE_PROFILING_ZONE;
+
+        duk_push_global_object(ctx); // [global]
 
         // Complete profile: properties, geometry, and API bindings.
         if ( complete )
@@ -165,48 +171,60 @@ namespace
         // Minimal profile: ID and properties only. MUCH faster!
         else
         {
-            duk_idx_t feature_i = duk_push_object(ctx);
+            duk_idx_t feature_i = duk_push_object(ctx);     // [global] [feature]
             {
-                duk_push_int(ctx, feature->getFID());
-                duk_put_prop_string(ctx, feature_i, "id");
+                duk_push_number(ctx, feature->getFID());       // [global] [feature] [id]
+                duk_put_prop_string(ctx, feature_i, "id");  // [global] [feature]
 
-                duk_idx_t props_i = duk_push_object(ctx);
+                duk_idx_t props_i = duk_push_object(ctx);   // [global] [feature] [properties]
                 {
                     const AttributeTable& attrs = feature->getAttrs();
                     for(AttributeTable::const_iterator a = attrs.begin(); a != attrs.end(); ++a)
                     {
-                        AttributeType type = a->second.first;
+                        AttributeType type = a->second.type;
                         switch(type) {
-                        case ATTRTYPE_DOUBLE: duk_push_number (ctx, a->second.getDouble()); break;
-                        case ATTRTYPE_INT:    duk_push_int    (ctx, a->second.getInt()); break;
-                        case ATTRTYPE_BOOL:   duk_push_boolean(ctx, a->second.getBool()); break;
+                        case ATTRTYPE_DOUBLE: duk_push_number (ctx, a->second.getDouble()); break;          // [global] [feature] [properties] [name]
+                        case ATTRTYPE_INT:    duk_push_number(ctx, (double)a->second.getInt()); break;             // [global] [feature] [properties] [name]
+                        case ATTRTYPE_BOOL:   duk_push_boolean(ctx, a->second.getBool()?1:0); break;            // [global] [feature] [properties] [name]
+#if 0
+                        case ATTRTYPE_DOUBLEARRAY: break;
+#endif
                         case ATTRTYPE_STRING:
-                        default:              duk_push_string (ctx, a->second.getString().c_str()); break;
+                        default:              duk_push_string (ctx, a->second.getString().c_str()); break;  // [global] [feature] [properties] [name]
                         }
-                        duk_put_prop_string(ctx, props_i, a->first.c_str());
+                        duk_put_prop_string(ctx, props_i, a->first.c_str()); // [global] [feature] [properties]
                     }
                 }
-                duk_put_prop_string(ctx, feature_i, "properties");
+                duk_put_prop_string(ctx, feature_i, "properties"); // [global] [feature]
+
+                duk_idx_t geometry_i = duk_push_object(ctx);  // [global] [feature] [geometry]
+                {
+                    duk_push_string(ctx, Geometry::toString(feature->getGeometry()->getComponentType()).c_str()); // [global] [feature] [geometry] [type]
+                    duk_put_prop_string(ctx, geometry_i, "type"); // [global] [feature] [geometry]
+                }
+                duk_put_prop_string(ctx, feature_i, "geometry");
             }
-            duk_put_prop_string(ctx, -2, "feature");
+            duk_put_prop_string(ctx, -2, "feature"); // [global] [feature]
         }
 
-        duk_pop(ctx); 
+        duk_pop(ctx);
     }
-    
+
 }
 
 //............................................................................
 
 DuktapeEngine::Context::Context()
 {
-    _ctx = 0L;
+    _ctx = nullptr;
+    _bytecode = nullptr;
+    _errorCount = 0u;
 }
 
 void
 DuktapeEngine::Context::initialize(const ScriptEngineOptions& options, bool complete)
 {
-    if ( _ctx == 0L )
+    if ( _ctx == nullptr)
     {
         // new heap + context.
         _ctx = duk_create_heap_default();
@@ -215,7 +233,8 @@ DuktapeEngine::Context::initialize(const ScriptEngineOptions& options, bool comp
         // any functions or objects with the EcmaScript global object.
         if ( options.script().isSet() )
         {
-            bool ok = (duk_peval_string(_ctx, options.script()->getCode().c_str()) == 0); // [ "result" ]
+            std::string temp(options.script()->getCode());
+            bool ok = (duk_peval_string(_ctx, temp.c_str()) == 0); // [ "result" ]
             if ( !ok )
             {
                 const char* err = duk_safe_to_string(_ctx, -1);
@@ -248,15 +267,15 @@ DuktapeEngine::Context::~Context()
     if ( _ctx )
     {
         duk_destroy_heap(_ctx);
-        _ctx = 0L;
+        _ctx = nullptr;
     }
 }
 
 //............................................................................
 
 DuktapeEngine::DuktapeEngine(const ScriptEngineOptions& options) :
-ScriptEngine( options ),
-_options    ( options )
+    ScriptEngine(options),
+    _options(options)
 {
     //nop
 }
@@ -266,55 +285,177 @@ DuktapeEngine::~DuktapeEngine()
     //nop
 }
 
-ScriptResult
-DuktapeEngine::run(const std::string&   code,
-                   Feature const*       feature,
-                   FilterContext const* context)
+bool
+DuktapeEngine::compile(
+    Context& c,
+    const std::string& code,
+    ScriptResult& result)
+{
+    //OE_PROFILING_ZONE;
+
+    duk_context* ctx = c._ctx;
+
+    if (code != c._bytecodeSource)
+    {
+        c._bytecodeSource = code;
+        c._errorCount = 0u;
+
+        if (duk_pcompile_string(ctx, 0, code.c_str()) != 0) // [function|error]
+        {
+            std::string resultString = duk_safe_to_string(ctx, -1);
+            OE_WARN << LC << "Compile error: " << resultString << std::endl;
+            c._errorCount++;
+            duk_pop(ctx); // []
+            result = ScriptResult("", false, resultString); // return error.
+            return false;
+        }
+
+        duk_dump_function(ctx); // [buffer]
+        duk_size_t size;
+        void* bytecode = duk_get_buffer(ctx, 0, &size);
+        if (bytecode == nullptr)
+        {
+            // error. remove the buffer and return.
+            duk_pop(ctx); // []
+            OE_WARN << LC << "Allocation error; cannot continue" << std::endl;
+            result = ScriptResult("", false, "Allocation error"); // return error
+            c._errorCount++;
+            return false;
+        }
+
+        if (c._bytecode) delete[] c._bytecode;
+        c._bytecode = new unsigned char[size];
+        ::memcpy(c._bytecode, (unsigned char*)bytecode, size);
+        c._bytecodeSize = size;
+    }
+    else if (c._errorCount == 0u)
+    {
+        void* buf = duk_push_buffer(ctx, (duk_size_t)c._bytecodeSize, (duk_bool_t)0); // [buffer]
+        ::memcpy(buf, c._bytecode, c._bytecodeSize);
+    }
+    else
+    {
+        // this code caused a previous compile error, so bail out.
+        return false;
+    }
+
+    // convert bytecode to a function object:
+    duk_load_function(ctx); // [function]
+
+    return true;
+}
+
+bool
+DuktapeEngine::run(
+    const std::string& code,
+    const FeatureList& features,
+    std::vector<ScriptResult>& results,
+    FilterContext const* context)
 {
     if (code.empty())
-        return ScriptResult(EMPTY_STRING, false, "Script is empty.");
-        
-    bool complete = (getProfile() == "full");
+    {
+        for (auto& f : features)
+            results.emplace_back(EMPTY_STRING, false, "Script is empty.");
+        return false;
+    }
 
-#ifdef MAXIMUM_ISOLATION
-    // brand new context every time
-    Context c;
-    c.initialize( _options, complete );
+    OE_PROFILING_ZONE;
+
+    const bool complete = false;
+
+    // cache the Context on a per-thread basis
+    Context& c = _contexts.get();
+    c.initialize(_options, complete);
     duk_context* ctx = c._ctx;
-#else
+
+    std::string resultString;
+    ScriptResult result;
+
+    if (!compile(c, code, result)) // [function | null]
+    {
+        for (auto& f : features)
+            results.push_back(result);
+        return false;
+    }
+
+    for (auto& feature : features)
+    {
+        // Load the next feature into the global object:
+        setFeature(c._ctx, feature.get(), complete);
+
+        // Duplicate the function on the top since we'll be calling it multiple times
+        duk_dup_top(ctx); // [function function]
+
+        // Run the script:
+        duk_int_t rc = duk_pcall(ctx, 0); // [function result]
+        resultString = duk_safe_to_string(ctx, -1);
+        duk_pop(ctx); // [function]
+
+        if (rc != DUK_EXEC_SUCCESS)
+        {
+            OE_WARN << LC << "Runtime error: " << resultString << std::endl;
+            c._errorCount++;
+            results.emplace_back(EMPTY_STRING, false, resultString); // error
+        }
+        else
+        {
+            results.emplace_back(resultString, true);
+        }
+    }
+
+    // Pop the function, clearing the stack
+    duk_pop(ctx); // []
+
+    return true;
+}
+
+ScriptResult
+DuktapeEngine::run(
+    const std::string& code,
+    Feature const* feature,
+    FilterContext const* context)
+{
+    if (code.empty())
+        return ScriptResult(EMPTY_STRING, false, "Script is empty");
+
+    if (!feature)
+        return ScriptResult(EMPTY_STRING, false, "Feature is null");
+
+    OE_PROFILING_ZONE;
+
+    const bool complete = false;
+
     // cache the Context on a per-thread basis
     Context& c = _contexts.get();
     c.initialize( _options, complete );
     duk_context* ctx = c._ctx;
-#endif
 
-	if ( feature && feature != c._feature.get() )
+    // compile the function:
+    ScriptResult result;
+    if (!compile(c, code, result)) // [function]
     {
-		// encode the feature in the global object and push a native pointer:
-		setFeature(ctx, feature, complete);
-	}
-
-    // remember the feature so we don't re-create it if not necessary
-    c._feature = feature;
-
-    // run the script. On error, the top of stack will hold the error
-    // message instead of the return value.
-    std::string resultString;
-
-    bool ok = (duk_peval_string(ctx, code.c_str()) == 0); // [ "result" ]
-    const char* resultVal = duk_to_string(ctx, -1);
-    if ( resultVal )
-        resultString = resultVal;
-
-    if ( !ok )
-    {
-        OE_DEBUG << LC << "Error: source =" << std::endl << code << std::endl;
+        return result;
     }
 
-    // pop the return value:
+    // load the feature into the global namespace:
+	if ( feature != c._feature.get() )
+    {
+		setFeature(ctx, feature, complete);
+        c._feature = feature;
+	}
+
+    std::string resultString;
+
+    duk_int_t rc = duk_pcall(ctx, 0); // [result]
+    resultString = duk_safe_to_string(ctx, -1);
     duk_pop(ctx); // []
 
-    return ok ?
-        ScriptResult(resultString, true) :
-        ScriptResult("", false, resultString);
+    if (rc != DUK_EXEC_SUCCESS)
+    {
+        OE_WARN << LC << "Runtime error: " << resultString << std::endl;
+        c._errorCount++;
+        return ScriptResult(EMPTY_STRING, false, resultString); // error
+    }
+
+    return ScriptResult(resultString, true);
 }

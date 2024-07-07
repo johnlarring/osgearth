@@ -1,38 +1,38 @@
-#the old construct SUBDIRS( was substituded by ADD_SUBDIRECTORY that is to be preferred according on CMake docs.
-FOREACH( lib
-         osgEarth
-         osgEarthAnnotation
-         osgEarthFeatures
-         osgEarthSymbology
-         osgEarthUtil )
-
-    ADD_SUBDIRECTORY(${lib})
-
-    SET_PROPERTY(TARGET ${lib} PROPERTY FOLDER "Core")
-
-ENDFOREACH( lib )
 
 
-FOREACH( lib
-         osgEarthSplat
-         osgEarthSilverLining
-         osgEarthTriton )
-    add_subdirectory( ${lib} )
-ENDFOREACH( lib )
+#optionals:
+if(OSGEARTH_BUILD_PROCEDURAL_NODEKIT)
+    add_subdirectory(osgEarthProcedural)
+endif()
 
-ADD_SUBDIRECTORY( osgEarthDrivers )
+if(OSGEARTH_BUILD_CESIUM_NODEKIT)
+    add_subdirectory(osgEarthCesium)
+endif()
 
-IF(BUILD_APPLICATIONS AND NOT ANDROID)
-    ADD_SUBDIRECTORY( applications )
-ENDIF()
+if(OSGEARTH_BUILD_TRITON_NODEKIT)
+    add_subdirectory(osgEarthTriton)
+endif()
 
-IF(BUILD_TESTS AND NOT OSGEARTH_BUILD_PLATFORM_IPHONE)
-    ADD_SUBDIRECTORY( tests )
-ENDIF()
+if(OSGEARTH_BUILD_SILVERLINING_NODEKIT)
+    add_subdirectory(osgEarthSilverLining)
+endif()
 
+if(OSGEARTH_BUILD_TOOLS OR OSGEARTH_BUILD_EXAMPLES)
+    add_subdirectory( applications )
+endif()
 
-IF(MSVC80)
-  OPTION(OSGEARTH_MSVC_GENERATE_PLUGINS_AND_WRAPPERS_MANIFESTS "Generate or not manifests files under VS8 for dynamically loaded dlls" ON)
-ENDIF(MSVC80)
+if(OSGEARTH_BUILD_TESTS AND NOT OSGEARTH_BUILD_PLATFORM_IPHONE)
+    add_subdirectory( tests )
+endif()
 
+if(OSGEARTH_BUILD_LEGACY_SPLAT_NODEKIT)
+    add_subdirectory(osgEarthSplat)
+endif()
 
+# plugins:
+add_subdirectory(osgEarthDrivers)
+
+# Do this LAST since we are generating the BuildConfig header
+# based on everything that's happened so far
+add_subdirectory(osgEarth)
+set_property(TARGET osgEarth PROPERTY FOLDER "Core")

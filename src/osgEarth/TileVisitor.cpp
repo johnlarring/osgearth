@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -17,33 +17,32 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
 #include <osgEarth/TileVisitor>
-#include <osgEarth/CacheEstimator>
+#include <osgEarth/TileEstimator>
 #include <osgEarth/FileUtils>
+#include <thread>
+#include <algorithm>
 
-#if OSG_VERSION_GREATER_OR_EQUAL(3,5,10)
 #include <osg/os_utils>
 #define OS_SYSTEM osg_system
-#else
-#define OS_SYSTEM system
-#endif
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
-TileVisitor::TileVisitor():
-_total(0),
-_processed(0),
-_minLevel(0),
-_maxLevel(5)
+TileVisitor::TileVisitor() :
+    _total(0),
+    _processed(0),
+    _minLevel(0),
+    _maxLevel(99)
 {
 }
 
 
-TileVisitor::TileVisitor(TileHandler* handler):
-_tileHandler( handler ),
-_total(0),
-_processed(0),
-_minLevel(0),
-_maxLevel(5)
+TileVisitor::TileVisitor(TileHandler* handler) :
+    _tileHandler(handler),
+    _total(0),
+    _processed(0),
+    _minLevel(0),
+    _maxLevel(99)
 {
 }
 
@@ -53,26 +52,57 @@ void TileVisitor::resetProgress()
     _processed = 0;
 }
 
-void TileVisitor::addExtent( const GeoExtent& extent )
+void
+TileVisitor::addExtentToVisit( const GeoExtent& extent )
 {
-    _extents.push_back( extent );
+    _extentsToVisit.push_back( extent );
+}
+
+void
+TileVisitor::addExtentToDataIndex(const GeoExtent& extent)
+{
+    double min[2] = { extent.xMin(), extent.yMin() };
+    double max[2] = { extent.xMax(), extent.yMax() };
+    _dataExtentIndex.Insert(min, max, _dataExtentIndex.Count());
 }
 
 bool TileVisitor::intersects( const GeoExtent& extent )
-{    
-    if ( _extents.empty()) return true;
-    else
+{
+    for (auto& e : _extentsToVisit)
     {
-        for (unsigned int i = 0; i < _extents.size(); ++i)
+        if (e.intersects(extent))
         {
-            if (_extents[i].intersects( extent ))                
-            {
-                return true;
-            }
-
+            return true;
         }
     }
+
     return false;
+}
+
+bool TileVisitor::hasData(const TileKey& key)
+{
+    GeoExtent extent = key.getExtent();
+
+    // Check the data extents index to see if we might have data in this area.
+    if (_dataExtentIndex.Count() > 0)
+    {
+        double min[2] = { extent.xMin(), extent.yMin() };
+        double max[2] = { extent.xMax(), extent.yMax() };
+        std::vector< unsigned int > hits;
+        auto stop_on_any_hit = [](const unsigned&) { return RTREE_STOP_SEARCHING; }; // stop on any hit
+        if (_dataExtentIndex.Search(min, max, stop_on_any_hit) == 0)
+        {
+            return false;
+        }
+    }
+
+    // Check the tile handler
+    if (_tileHandler.valid())
+    {
+        return _tileHandler->hasData(key);
+    }
+
+    return true;
 }
 
 void TileVisitor::setTileHandler( TileHandler* handler )
@@ -88,10 +118,10 @@ void TileVisitor::setProgressCallback( ProgressCallback* progress )
 void TileVisitor::run( const Profile* mapProfile )
 {
     _profile = mapProfile;
-    
+
     // Reset the progress in case this visitor has been ran before.
     resetProgress();
-    
+
     estimate();
 
     // Get all the root keys and process them.
@@ -106,40 +136,41 @@ void TileVisitor::run( const Profile* mapProfile )
 
 void TileVisitor::estimate()
 {
-    //Estimate the number of tiles    
-    CacheEstimator est;
-    est.setMinLevel( _minLevel );
-    est.setMaxLevel( _maxLevel );
-    est.setProfile( _profile.get() ); 
-    for (unsigned int i = 0; i < _extents.size(); i++)
-    {                
-        est.addExtent( _extents[ i ] );
-    } 
-    _total = est.getNumTiles();
+    if (_tileHandler.valid())
+    {
+        _total = _tileHandler->getEstimatedTileCount(
+            _extentsToVisit,
+            _minLevel,
+            _maxLevel);
+    }
+    else
+    {
+        _total = 0;
+    }
 }
 
 void TileVisitor::processKey( const TileKey& key )
-{        
+{
     // If we've been cancelled then just return.
     if (_progress && _progress->isCanceled())
-    {        
+    {
         return;
-    }    
+    }
 
     unsigned int x, y, lod;
     key.getTileXY(x, y);
-    lod = key.getLevelOfDetail();    
+    lod = key.getLevelOfDetail();
 
     // Only process this key if it has a chance of succeeding.
-    if (_tileHandler && !_tileHandler->hasData(key))
-    {                
+    if (!hasData(key))
+    {
         return;
-    }    
+    }
 
     bool traverseChildren = false;
 
     // If the key intersects the extent attempt to traverse
-    if (intersects( key.getExtent() ))
+    if (intersects(key.getExtent()))
     {
         // If the lod is less than the min level don't do anything but do traverse the children.
         if (lod < _minLevel)
@@ -147,9 +178,9 @@ void TileVisitor::processKey( const TileKey& key )
             traverseChildren = true;
         }
         else
-        {         
+        {
             // Process the key
-            traverseChildren = handleTile( key );        
+            traverseChildren = handleTile(key);
         }
     }
 
@@ -160,16 +191,17 @@ void TileVisitor::processKey( const TileKey& key )
         {
             TileKey k = key.createChildKey(i);
             processKey( k );
-        }                                
-    }       
+        }
+    }
 }
 
 void TileVisitor::incrementProgress(unsigned int amount)
 {
     {
-        OpenThreads::ScopedLock< OpenThreads::Mutex > lk(_progressMutex );
+        std::lock_guard<std::mutex> lk(_progressMutex );
         _processed += amount;
     }
+
     if (_progress.valid())
     {
         // If report progress returns true then mark the task as being cancelled.
@@ -177,107 +209,95 @@ void TileVisitor::incrementProgress(unsigned int amount)
         {
             _progress->cancel();
         }
-    }    
+    }
 }
 
 bool TileVisitor::handleTile( const TileKey& key )
-{    
+{
     bool result = false;
     if (_tileHandler.valid() )
     {
         result = _tileHandler->handleTile( key, *this );
     }
 
-    incrementProgress(1);    
-    
+    incrementProgress(1);
+
     return result;
 }
 
 
 
 /*****************************************************************************************/
-/**
- * A TaskRequest that runs a TileHandler in a background thread.
- */
-class HandleTileTask : public TaskRequest
-{
-public:
-    HandleTileTask( TileHandler* handler, TileVisitor* visitor, const TileKey& key ):      
-      _handler( handler ),
-          _visitor(visitor),
-          _key( key )
-      {
 
-      }
-
-      virtual void operator()(ProgressCallback* progress )
-      {         
-          if (_handler.valid())
-          {                           
-              _handler->handleTile( _key, *_visitor.get() );
-              _visitor->incrementProgress(1);
-          }
-      }
-
-      osg::ref_ptr<TileHandler> _handler;
-      TileKey _key;
-      osg::ref_ptr<TileVisitor> _visitor;
-};
-
-MultithreadedTileVisitor::MultithreadedTileVisitor():
-_numThreads( OpenThreads::GetNumberOfProcessors() )
+MultithreadedTileVisitor::MultithreadedTileVisitor() :
+    _numThreads(std::max(1u, std::thread::hardware_concurrency()))
 {
     // We must do this to avoid an error message in OpenSceneGraph b/c the findWrapper method doesn't appear to be threadsafe.
     // This really isn't a big deal b/c this only effects data that is already cached.
-    osgDB::ObjectWrapper* wrapper = osgDB::Registry::instance()->getObjectWrapperManager()->findWrapper( "osg::Image" );
+    osgDB::ObjectWrapper* wrapper = osgDB::Registry::instance()->getObjectWrapperManager()->findWrapper("osg::Image");
+
+    _group = jobs::jobgroup::create();
 }
 
-MultithreadedTileVisitor::MultithreadedTileVisitor( TileHandler* handler ):
-TileVisitor( handler ),
-    _numThreads( OpenThreads::GetNumberOfProcessors() )
+MultithreadedTileVisitor::MultithreadedTileVisitor(TileHandler* handler) :
+    TileVisitor(handler),
+    _numThreads(std::max(1u, std::thread::hardware_concurrency()))
 {
 }
 
 unsigned int MultithreadedTileVisitor::getNumThreads() const
 {
-    return _numThreads; 
+    return _numThreads;
 }
 
 void MultithreadedTileVisitor::setNumThreads( unsigned int numThreads)
 {
-    _numThreads = numThreads; 
+    _numThreads = numThreads;
 }
 
+#define MTTV "oe.mttilevisitor"
+
 void MultithreadedTileVisitor::run(const Profile* mapProfile)
-{                   
+{
     // Start up the task service
-    OE_INFO << "Starting " << _numThreads << std::endl;
-    _taskService = new TaskService( "MTTileHandler", _numThreads, 1000 );
+    OE_INFO << "Starting " << _numThreads << " threads " << std::endl;
+
+    jobs::get_pool(MTTV)->set_concurrency(_numThreads);
 
     // Produce the tiles
     TileVisitor::run( mapProfile );
 
-    // Send a poison pill to kill all the threads
-    _taskService->add( new PoisonPill() );
-
-    OE_INFO << "Waiting on threads to complete" << _taskService->getNumRequests() << " tasks remaining" << std::endl;
-
-    // Wait for everything to finish, checking for cancellation while we wait so we can kill all the existing tasks.
-    while (_taskService->areThreadsRunning())
-    {
-        OpenThreads::Thread::microSleep(10000);
-        if (_progress && _progress->isCanceled())
-        {            
-            _taskService->cancelAll();
-        }
-    }
-    OE_INFO << "All threads have completed" << std::endl;
+    _group->join();
 }
 
-bool MultithreadedTileVisitor::handleTile( const TileKey& key )        
-{    
+bool MultithreadedTileVisitor::handleTile(const TileKey& key)
+{
+    // atomically increment the task count
+    //_numTiles++;
+
+    // don't let the task queue get too large...?
+    while(jobs::get_metrics()->total_pending() > 1000)
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
     // Add the tile to the task queue.
-    _taskService->add( new HandleTileTask(_tileHandler.get(), this, key ) );
+    auto task = [this, key]()
+    {
+        if ((_tileHandler.valid()) && (!_progress.valid() || !_progress->isCanceled()))
+        {
+            _tileHandler->handleTile(key, *this);
+            this->incrementProgress(1);
+        }
+    };
+
+    jobs::context job;
+    job.name = "handleTile";
+    job.pool = jobs::get_pool(MTTV);
+    job.group = _group;
+
+    jobs::dispatch(task, job);
+
     return true;
 }
 
@@ -289,20 +309,20 @@ _profile( profile )
 }
 
 bool TaskList::load( const std::string &filename)
-{          
+{
     std::ifstream in( filename.c_str(), std::ios::in );
 
     std::string line;
     while( getline(in, line) )
-    {            
+    {
         std::vector< std::string > parts;
         StringTokenizer(line, parts, "," );
 
         if (parts.size() >= 3)
         {
             _keys.push_back( TileKey(
-                as<unsigned int>(parts[0], 0u), 
-                as<unsigned int>(parts[1], 0u), 
+                as<unsigned int>(parts[0], 0u),
+                as<unsigned int>(parts[1], 0u),
                 as<unsigned int>(parts[2], 0u),
                 _profile.get() ) );
         }
@@ -313,7 +333,7 @@ bool TaskList::load( const std::string &filename)
 }
 
 void TaskList::save( const std::string& filename )
-{        
+{
     std::ofstream out( filename.c_str() );
     for (TileKeyList::iterator itr = _keys.begin(); itr != _keys.end(); ++itr)
     {
@@ -329,179 +349,4 @@ TileKeyList& TaskList::getKeys()
 const TileKeyList& TaskList::getKeys() const
 {
     return _keys;
-}
-
-/*****************************************************************************************/
-MultiprocessTileVisitor::MultiprocessTileVisitor():
-    _numProcesses( OpenThreads::GetNumberOfProcessors() ),
-    _batchSize(100)
-{
-    osgDB::ObjectWrapper* wrapper = osgDB::Registry::instance()->getObjectWrapperManager()->findWrapper( "osg::Image" );
-}
-
-MultiprocessTileVisitor::MultiprocessTileVisitor( TileHandler* handler ):
-TileVisitor( handler ),
-    _numProcesses( OpenThreads::GetNumberOfProcessors() ),
-    _batchSize(100)
-{
-}
-
-unsigned int MultiprocessTileVisitor::getNumProcesses() const
-{
-    return _numProcesses; 
-}
-
-void MultiprocessTileVisitor::setNumProcesses( unsigned int numProcesses)
-{
-    _numProcesses = numProcesses; 
-}
-
-unsigned int MultiprocessTileVisitor::getBatchSize() const
-{
-    return _batchSize;
-}
-
-void MultiprocessTileVisitor::setBatchSize( unsigned int batchSize )
-{
-    _batchSize = batchSize;
-}
-
-
-void MultiprocessTileVisitor::run(const Profile* mapProfile)
-{                             
-    // Start up the task service          
-    _taskService = new TaskService( "MPTileHandler", _numProcesses, 1000 );
-    
-    // Produce the tiles
-    TileVisitor::run( mapProfile );
-
-    // Process any remaining tasks in the final batch
-    processBatch();
-
-    // Send a poison pill to kill all the threads
-    _taskService->add( new PoisonPill() );
-   
-    OE_INFO << "Waiting on threads to complete" << _taskService->getNumRequests() << " tasks remaining" << std::endl;
-
-    // Wait for everything to finish, checking for cancellation while we wait so we can kill all the existing tasks.
-    while (_taskService->areThreadsRunning())
-    {
-        OpenThreads::Thread::microSleep(10000);
-        if (_progress && _progress->isCanceled())
-        {            
-            _taskService->cancelAll();
-        }
-    }
-    OE_INFO << "All threads have completed" << std::endl;
-}
-
-bool MultiprocessTileVisitor::handleTile( const TileKey& key )        
-{        
-    _batch.push_back( key );
-
-    if (_batch.size() == _batchSize)
-    {
-        processBatch();
-    }         
-    return true;
-}
-
-const std::string& MultiprocessTileVisitor::getEarthFile() const
-{
-    return _earthFile;
-}
-
-void MultiprocessTileVisitor::setEarthFile( const std::string& earthFile )
-{
-    _earthFile = earthFile;
-}
-
-/**
-* Executes a command in an external process
-*/
-class ExecuteTask : public TaskRequest
-{
-public:
-    ExecuteTask(const std::string& command, TileVisitor* visitor, unsigned int count):            
-      _command( command ),
-      _visitor( visitor ),
-      _count( count )
-      {
-      }
-
-      virtual void operator()(ProgressCallback* progress )
-      {         
-          OS_SYSTEM(_command.c_str());     
-
-          // Cleanup the temp files and increment the progress on the visitor.
-          cleanupTempFiles();
-          _visitor->incrementProgress( _count );
-      }
-
-      void addTempFile( const std::string& filename )
-      {
-          _tempFiles.push_back(filename);
-      }
-
-      void cleanupTempFiles()
-      {
-          for (unsigned int i = 0; i < _tempFiles.size(); i++)
-          {
-              remove( _tempFiles[i].c_str() );
-          }
-      }
-
-
-      std::vector< std::string > _tempFiles;
-      std::string _command;
-      TileVisitor* _visitor;
-      unsigned int _count;
-};
-
-void MultiprocessTileVisitor::processBatch()
-{       
-    TaskList tasks( 0 );
-    for (unsigned int i = 0; i < _batch.size(); i++)
-    {
-        tasks.getKeys().push_back( _batch[i] );
-    }
-    // Save the task file out.
-    std::string tmpPath = getTempPath();
-    std::string filename = getTempName(tmpPath, "batch.tiles");        
-    tasks.save( filename );        
-
-    std::stringstream command;        
-    command << _tileHandler->getProcessString() << " --tiles " << filename << " " << _earthFile;
-    OE_INFO << "Running command " << command.str() << std::endl;
-    osg::ref_ptr< ExecuteTask > task = new ExecuteTask( command.str(), this, tasks.getKeys().size() );
-    // Add the task file as a temp file to the task to make sure it gets deleted
-    task->addTempFile( filename );
-
-    _taskService->add(task.get());
-    _batch.clear();
-}
-
-
-/*****************************************************************************************/
-TileKeyListVisitor::TileKeyListVisitor()
-{
-}
-
-void TileKeyListVisitor::setKeys(const TileKeyList& keys)
-{
-    _keys = keys;
-}
-
-void TileKeyListVisitor::run(const Profile* mapProfile)
-{
-    resetProgress();        
-
-    for (TileKeyList::iterator itr = _keys.begin(); itr != _keys.end(); ++itr)
-    {
-        if (_tileHandler)
-        {
-            _tileHandler->handleTile( *itr, *this );
-            incrementProgress(1);
-        }
-    }
 }

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -22,12 +22,14 @@
 #include <Version.h>
 #include <osg/MatrixTransform>
 #include <osg/FrameBufferObject>
+#include <osg/Depth>
 
 #include <osgEarth/SpatialReference>
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/MapNode>
 #include <osgEarth/TerrainEngineNode>
 #include <osgEarth/Random>
+#include <osgEarth/GLUtils>
 
 #undef  LC
 #define LC "[TritonDrawable] "
@@ -38,7 +40,7 @@ using namespace osgEarth::Triton;
 
 
 TritonDrawable::TritonDrawable(TritonContext* TRITON) :
-_TRITON(TRITON)
+    _TRITON(TRITON)
 {
     // call this to ensure draw() gets called every frame.
     setSupportsDisplayList( false );
@@ -46,6 +48,9 @@ _TRITON(TRITON)
 
     // dynamic variance prevents update/cull overlap when drawing this
     setDataVariance( osg::Object::DYNAMIC );
+
+    _wgs84 = SpatialReference::get("wgs84");
+    _ecef = _wgs84->getGeocentricSRS();
 }
 
 TritonDrawable::~TritonDrawable()
@@ -101,6 +106,8 @@ getOceanShader(::Triton::Ocean* ocean, ::Triton::Shaders shaderProgram, void* co
 void
 TritonDrawable::drawImplementation(osg::RenderInfo& renderInfo) const
 {
+    OE_GL_ZONE;
+
     osg::State* state = renderInfo.getState();
 
     state->disableAllVertexArrays();
@@ -132,20 +139,21 @@ TritonDrawable::drawImplementation(osg::RenderInfo& renderInfo) const
     }
     ::Triton::Camera* tritonCam = local._tritonCam;
 
-    osgEarth::NativeProgramAdapterCollection& adapters = _adapters[ state->getContextID() ];
+    auto cid = GLUtils::getSharedContextID(*state);
+    osgEarth::NativeProgramAdapterCollection& adapters = _adapters[cid];
     if ( adapters.empty() )
     {
         OE_INFO << LC << "Initializing Triton program adapters" << std::endl;
-        const char* prefix = NULL; //"oe_"; // because, don't forget osg_*
-        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::WATER_SURFACE, 0L, tritonCam), prefix, "WATER_SURFACE"));
-        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::WATER_SURFACE_PATCH, 0L, tritonCam), prefix, "WATER_SURFACE_PATCH"));
-        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::GOD_RAYS, 0L, tritonCam), prefix, "GOD_RAYS"));
-        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::SPRAY_PARTICLES, 0L, tritonCam), prefix, "SPRAY_PARTICLES"));
-        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::WAKE_SPRAY_PARTICLES, 0L, tritonCam), prefix, "WAKE_SPRAY_PARTICLES"));
+        const std::vector<const char*> prefixes = { "osg_", "oe_" };
+        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::WATER_SURFACE, 0L, tritonCam), prefixes, "WATER_SURFACE"));
+        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::WATER_SURFACE_PATCH, 0L, tritonCam), prefixes, "WATER_SURFACE_PATCH"));
+        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::GOD_RAYS, 0L, tritonCam), prefixes, "GOD_RAYS"));
+        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::SPRAY_PARTICLES, 0L, tritonCam), prefixes, "SPRAY_PARTICLES"));
+        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::WAKE_SPRAY_PARTICLES, 0L, tritonCam), prefixes, "WAKE_SPRAY_PARTICLES"));
 #if 0
         // In older Triton (3.91), this line causes problems in Core profile and prevents the ocean from drawing.  In newer Triton (4.01),
         // this line causes a crash because there is no context passed in to GetShaderObject(), resulting in multiple NULL references.
-        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::WATER_DECALS, 0L, tritonCam), prefix, "WATER_DECALS"));
+        adapters.push_back( new osgEarth::NativeProgramAdapter(state, getOceanShader(_TRITON->getOcean(), ::Triton::WATER_DECALS, 0L, tritonCam), prefixes, "WATER_DECALS"));
 #endif
     }
     adapters.apply( state );
@@ -156,6 +164,15 @@ TritonDrawable::drawImplementation(osg::RenderInfo& renderInfo) const
     {
         tritonCam->SetCameraMatrix(state->getModelViewMatrix().ptr());
         tritonCam->SetProjectionMatrix(state->getProjectionMatrix().ptr());
+    }
+
+    // Calculate sea level based on the camera:
+    if (_verticalDatum.valid())
+    {
+        GeoPoint cam(_ecef, osg::Vec3d(0, 0, 0) * state->getInitialInverseViewMatrix(), ALTMODE_ABSOLUTE);
+        cam.transformInPlace(_wgs84);
+        auto msl = _verticalDatum->hae2msl(cam.y(), cam.x(), 0.0);
+        environment->SetSeaLevel(-msl);
     }
 
     if (_heightMapGenerator.valid())
@@ -190,10 +207,6 @@ TritonDrawable::drawImplementation(osg::RenderInfo& renderInfo) const
                 _TRITON->getOceanWrapper());
         }
 
-        // The sun position is roughly where it is in our skybox texture:
-
-        // Since this is a simple example we will just assume that Sun is the light from View light source
-        // TODO: fix this...
         osg::Light* light = renderInfo.getView() ? renderInfo.getView()->getLight() : NULL;
 
         // This is the light attached to View so there are no transformations above..
@@ -231,7 +244,7 @@ TritonDrawable::drawImplementation(osg::RenderInfo& renderInfo) const
             pos3.normalize();
             float dot = osg::clampAbove(up*pos3, 0.0); dot*=dot;
             float sunAmbient = (float)osg::clampBetween( dot, 0.0f, 0.88f );
-            float fa = std::max(sunAmbient, ambient[0]);
+            float fa = osg::maximum(sunAmbient, ambient[0]);
 
             // Ambient color based on the zenith color in the cube map
             environment->SetAmbientLight( ::Triton::Vector3(fa, fa, fa) );
@@ -257,7 +270,7 @@ TritonDrawable::drawImplementation(osg::RenderInfo& renderInfo) const
             // Grab the cube map from our sky box and give it to Triton to use as an _environment map
             // GLenum texture = renderInfo.getState()->getLastAppliedTextureAttribute( _stage, osg::StateAttribute::TEXTURE );
             environment->SetEnvironmentMap(
-                (::Triton::TextureHandle)_cubeMap->getTextureObject( state->getContextID() )->id(),
+                (::Triton::TextureHandle)_cubeMap->getTextureObject(cid)->id(),
                 transformFromYUpToZUpCubeMapCoords );
 
             if( _planarReflectionMap.valid() && _planarReflectionProjection.valid() )
@@ -270,7 +283,7 @@ TritonDrawable::drawImplementation(osg::RenderInfo& renderInfo) const
                     p(2,0), p(2,1), p(2,2) );
 
                 environment->SetPlanarReflectionMap(
-                    (::Triton::TextureHandle)_planarReflectionMap->getTextureObject( state->getContextID() )->id(),
+                    (::Triton::TextureHandle)_planarReflectionMap->getTextureObject(cid)->id(),
                     planarProjection,
                     0.125 );
             }
@@ -279,13 +292,21 @@ TritonDrawable::drawImplementation(osg::RenderInfo& renderInfo) const
         // Draw the ocean for the current time sample
         if ( _TRITON->getOcean() )
         {
-            osg::GLExtensions* ext = osg::GLExtensions::Get(state->getContextID(), true);
+            osg::GLExtensions* ext = osg::GLExtensions::Get(cid, true);
+
+            bool writeDepth = true;
+            const osg::Depth* depth = static_cast<const osg::Depth*>(state->getLastAppliedAttribute(osg::StateAttribute::DEPTH));
+            if (depth)
+                writeDepth = depth->getWriteMask();
+
+            double simTime = renderInfo.getView()->getFrameStamp()->getSimulationTime();
+            simTime = fmod(simTime, 86400.0);
 
             _TRITON->getOcean()->Draw(
-                renderInfo.getView()->getFrameStamp()->getSimulationTime() + osgEarth::Random().next(),
-                true, // depth writes
+                simTime,
+                writeDepth, // depth writes
                 true, // draw water
-                false, // draw particles
+                true, // draw particles
                 NULL, // optional context
                 tritonCam);
 

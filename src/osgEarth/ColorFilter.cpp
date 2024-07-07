@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -17,7 +17,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
 #include <osgEarth/ColorFilter>
-#include <osgEarth/ThreadingUtils>
+#include <mutex>
 
 using namespace osgEarth;
 
@@ -26,12 +26,12 @@ ColorFilterRegistry::instance()
 {
     // OK to be in the local scope since this gets called at static init time
     // by the OSGEARTH_REGISTER_COLORFILTER macro
-    static ColorFilterRegistry* s_singleton =0L;
-    static Threading::Mutex     s_singletonMutex;
+    static ColorFilterRegistry* s_singleton = nullptr;
+    static std::mutex     s_singletonMutex;
 
     if ( !s_singleton )
     {
-        Threading::ScopedMutexLock lock(s_singletonMutex);
+        std::lock_guard<std::mutex> lock(s_singletonMutex);
         if ( !s_singleton )
         {
             s_singleton = new ColorFilterRegistry();

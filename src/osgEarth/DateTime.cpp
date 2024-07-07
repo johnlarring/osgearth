@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2012 Pelican Mapping
 * http://osgearth.org
 *
@@ -25,6 +25,7 @@
 #include <stdio.h> 
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 namespace
 {
@@ -328,4 +329,14 @@ DateTime::operator+(double hours) const
 {
     double seconds = (double)asTimeStamp() + (hours*3600.0);
     return DateTime((TimeStamp)seconds);
+}
+
+void
+DateTimeExtent::expandBy(const DateTime& value)
+{
+    if (!_valid || value < _start)
+        _start = value;
+    if (!_valid || value > _end)
+        _end = value;
+    _valid = true;
 }

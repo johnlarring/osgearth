@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -16,30 +16,115 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
-#include <osgEarth/ShaderFactory>
+#include "ShaderFactory"
+#include "ShaderLoader"
+#include "ShaderUtils"
+#include "Capabilities"
+#include "GLUtils"
+#include "Threading"
+#include "Registry"
 
-#include <osgEarth/ShaderLoader>
-#include <osgEarth/Registry>
-#include <osgEarth/Capabilities>
+#include <sstream>
 
 #define LC "[ShaderFactory] "
 
-#if defined(OSG_GLES2_AVAILABLE) || defined(OSG_GLES3_AVAILABLE)
-    static bool s_GLES_SHADERS = true;
-#else
-    static bool s_GLES_SHADERS = false;
-#endif
-
-#define INDENT "    "
-#define RANGE  osgEarth::Registry::instance()->shaderFactory()->getRangeUniformName()
-
 using namespace osgEarth;
 using namespace osgEarth::ShaderComp;
+using namespace osgEarth::Util;
 
+namespace
+{
+    std::mutex s_glslMutex;
+    std::string s_glslHeader;
+
+    #if defined(OSG_GLES2_AVAILABLE) || defined(OSG_GLES3_AVAILABLE)
+        bool s_GLES_SHADERS = true;
+    #else
+        bool s_GLES_SHADERS = false;
+    #endif
+}
+
+#define INDENT "    "
 
 ShaderFactory::ShaderFactory()
 {
-    _fragStageOrder = FRAGMENT_STAGE_ORDER_COLORING_LIGHTING;
+    //nop
+}
+
+std::string
+ShaderFactory::getGLSLHeader()
+{
+    if (s_glslHeader.empty())
+    {
+        std::lock_guard<std::mutex> lock(s_glslMutex);
+        if (s_glslHeader.empty())
+        {
+            int version = Capabilities::get().getGLSLVersionInt();
+
+            std::ostringstream buf;
+            buf << "#version " << version;
+
+#if defined(OSG_GLES2_AVAILABLE) || defined(OSG_GLES3_AVAILABLE)
+            buf << "\nprecision highp float";
+#else
+            if (GLUtils::useNVGL())
+            {
+                buf << "\n#extension GL_NV_gpu_shader5 : enable";
+            }
+            else if (version >= 130)
+            {
+                if (Capabilities::get().supportsInt64())
+                {
+                    buf << "\n#extension GL_ARB_gpu_shader_int64 : enable";
+                }
+
+                //buf << "\n#extension GL_ARB_gpu_shader4 : enable";
+            }
+#endif
+
+            s_glslHeader = buf.str();
+        }
+    }
+    return s_glslHeader;
+}
+
+void
+ShaderFactory::clearProcessorCallbacks()
+{
+    ShaderPreProcessor::_pre_callbacks.clear();
+    ShaderPreProcessor::_post_callbacks.clear();
+}
+
+UID
+ShaderFactory::addPreProcessorCallback(
+    osg::Referenced* host,
+    std::function<void(std::string&, osg::Referenced*)> cb)
+{  
+    UID uid = osgEarth::createUID();
+    ShaderPreProcessor::_pre_callbacks[uid] = { host, cb };
+    return uid;
+}
+
+void
+ShaderFactory::removePreProcessorCallback(UID uid)
+{
+    ShaderPreProcessor::_pre_callbacks.erase(uid);
+}
+
+UID
+ShaderFactory::addPostProcessorCallback(
+    osg::Referenced* host,
+    std::function<void(osg::Shader*, osg::Referenced*)> cb)
+{
+    UID uid = osgEarth::createUID();
+    ShaderPreProcessor::_post_callbacks[uid] = { host, cb };
+    return uid;
+}
+
+void
+ShaderFactory::removePostProcessorCallback(UID uid)
+{
+    ShaderPreProcessor::_post_callbacks.erase(uid);
 }
 
 
@@ -61,63 +146,76 @@ namespace
 
     typedef std::vector<Variable> Variables;
 
-	void addExtensionsToBuffer(std::ostream& buf, const VirtualProgram::ExtensionsSet& in_extensions)
+	void addExtensionsToBuffer(
+        std::ostream& buf, 
+        const VirtualProgram::ExtensionsSet& extensions)
 	{
-	   for (VirtualProgram::ExtensionsSet::const_iterator it = in_extensions.begin(); it != in_extensions.end(); ++it)
-	   {
-	      const std::string& extension = *it;
-	      buf << "#extension "<<extension<< " : enable \n";
-	   }
-	}
+	   for (auto& extension : extensions)
+       {
+           buf << "#extension " << extension << " : enable\n";
+       }
+    }
 }
 
 
-ShaderComp::StageMask
-ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
-                           const VirtualProgram::ShaderMap&          in_shaders,
-                           const VirtualProgram::ExtensionsSet&      in_extensions,
-                           std::vector< osg::ref_ptr<osg::Shader> >& out_shaders) const
+VirtualProgram::StageMask
+ShaderFactory::createMains(
+    osg::State& state,
+    const VirtualProgram::FunctionLocationMap& functions,
+    const VirtualProgram::ShaderMap& in_shaders,
+    const VirtualProgram::ExtensionsSet& in_extensions,
+    std::vector< osg::ref_ptr<osg::Shader> >& out_shaders) const
 {
+    // We require attribute aliasing and matrix uniforms.
+    OE_SOFT_ASSERT(state.getUseVertexAttributeAliasing(),
+        "OpenSceneGraph vertex attribute aliasing must be enabled. Consider installing the GL3RealizeOperation in your viewer.");
+
+    OE_SOFT_ASSERT(state.getUseModelViewAndProjectionUniforms(),
+        "OpenSceneGraph matrix uniforms must be enabled. Consider installing the GL3RealizeOperation in your viewer.");
+
     StageMask stages =
-        ShaderComp::STAGE_VERTEX |
-        ShaderComp::STAGE_FRAGMENT;
+        VirtualProgram::STAGE_VERTEX |
+        VirtualProgram::STAGE_FRAGMENT;
 
     FunctionLocationMap::const_iterator f;
 
+    f = functions.find(VirtualProgram::LOCATION_VERTEX_TRANSFORM_MODEL_TO_VIEW);
+    const OrderedFunctionMap* xformModelToView = f != functions.end() ? &f->second : nullptr;
+
     // collect the "model" stage vertex functions:
-    f = functions.find( LOCATION_VERTEX_MODEL );
+    f = functions.find(VirtualProgram::LOCATION_VERTEX_MODEL );
     const OrderedFunctionMap* modelStage = f != functions.end() ? &f->second : 0L;
 
     // collect the "view" stage vertex functions:
-    f = functions.find( LOCATION_VERTEX_VIEW );
+    f = functions.find(VirtualProgram::LOCATION_VERTEX_VIEW );
     const OrderedFunctionMap* viewStage = f != functions.end() ? &f->second : 0L;
 
     // geometry shader functions:
-    f = functions.find( LOCATION_TESS_CONTROL );
+    f = functions.find(VirtualProgram::LOCATION_TESS_CONTROL );
     const OrderedFunctionMap* tessControlStage = f != functions.end() ? &f->second : 0L;
 
     // geometry shader functions:
-    f = functions.find( LOCATION_TESS_EVALUATION );
+    f = functions.find(VirtualProgram::LOCATION_TESS_EVALUATION );
     const OrderedFunctionMap* tessEvalStage = f != functions.end() ? &f->second : 0L;
 
     // geometry shader functions:
-    f = functions.find( LOCATION_GEOMETRY );
+    f = functions.find(VirtualProgram::LOCATION_GEOMETRY );
     const OrderedFunctionMap* geomStage = f != functions.end() ? &f->second : 0L;
 
     // collect the "clip" stage functions:
-    f = functions.find( LOCATION_VERTEX_CLIP );
+    f = functions.find(VirtualProgram::LOCATION_VERTEX_CLIP );
     const OrderedFunctionMap* clipStage = f != functions.end() ? &f->second : 0L;
 
     // fragment shader coloring functions:
-    f = functions.find( LOCATION_FRAGMENT_COLORING );
+    f = functions.find(VirtualProgram::LOCATION_FRAGMENT_COLORING );
     const OrderedFunctionMap* coloringStage = f != functions.end() ? &f->second : 0L;
 
     // fragment shader lighting functions:
-    f = functions.find( LOCATION_FRAGMENT_LIGHTING );
+    f = functions.find(VirtualProgram::LOCATION_FRAGMENT_LIGHTING );
     const OrderedFunctionMap* lightingStage = f != functions.end() ? &f->second : 0L;
 
     // fragment shader lighting functions:
-    f = functions.find( LOCATION_FRAGMENT_OUTPUT );
+    f = functions.find(VirtualProgram::LOCATION_FRAGMENT_OUTPUT );
     const OrderedFunctionMap* outputStage = f != functions.end() ? &f->second : 0L;
 
     // what do we need to build?
@@ -141,17 +239,32 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
     VarDefs varDefs;
 
     // built-ins:
-    varDefs.insert( "vec4 vp_Color" );
-    varDefs.insert( "vec3 vp_Normal" );
-    varDefs.insert( "vec4 vp_Vertex" );
+    varDefs.insert("vec4 vp_Color");
+    varDefs.insert("vec3 vp_Normal");
+    varDefs.insert("vec4 vp_Vertex");
+    varDefs.insert("vec3 vp_VertexView");
 
     // parse the vp_varyings (which were injected by the ShaderLoader)
+    // We actually only care about the in's. Because any varying that 
+    // doesn't have an "in" somewhere in the shader list is not actually
+    // being used as a varying, in which case we don't need it in the
+    // interface block.
+    // NOTE: The above statement is true IFF we don't move any vertex shaders
+    // to the TCS, TES, or GS phase. So we need to check that.
+
     for(VirtualProgram::ShaderMap::const_iterator s = in_shaders.begin(); s != in_shaders.end(); ++s )
     {
-        osg::Shader* shader = s->data()._shader->getNominalShader();
+        osg::Shader* shader = s->second._shader->getNominalShader();
         if ( shader )
         {
-            ShaderLoader::getAllPragmaValues(shader->getShaderSource(), "vp_varying", varDefs);
+            ShaderLoader::getAllPragmaValues(shader->getShaderSource(), "vp_varying_in", varDefs);
+
+            // Like I said above, if the possibility exists of shunting vertex shaders to
+            // a different stage, we need the outs after all.
+            if (hasTCS || hasTES || hasGS)
+            {
+                ShaderLoader::getAllPragmaValues(shader->getShaderSource(), "vp_varying_out", varDefs);
+            }
         }
     }
 
@@ -202,7 +315,7 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
         }
     }
 
-    std::string
+    const std::string
         gl_Color                     = "gl_Color",
         gl_Vertex                    = "gl_Vertex",
         gl_Normal                    = "gl_Normal",
@@ -214,27 +327,6 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
         gl_FrontColor                = "gl_FrontColor";
 
     std::string glMatrixUniforms = "";
-
-    #define GLSL_330 GLSL_VERSION_STR // "330 compatibility"
-
-#if defined(OSG_GL3_AVAILABLE) || defined(OSG_GL4_AVAILABLE)
-#   define GLSL_400 "400"
-#else
-#   define GLSL_400 "400 compatibility"
-#endif
-
-    // use GLSL 400 if it's avaiable since that will give the developer
-    // access to double-precision types.
-    bool use400 = 
-        Registry::instance()->hasCapabilities() &&
-        Registry::capabilities().getGLSLVersionInt() >= 400;
-
-    std::string tcs_glsl_version(GLSL_400);
-    std::string tes_glsl_version(GLSL_400);
-
-    std::string vs_glsl_version = use400 ? GLSL_400 : GLSL_330;
-    std::string fs_glsl_version = use400 ? GLSL_400 : GLSL_330;
-    std::string gs_glsl_version = use400 ? GLSL_400 : GLSL_330;
 
     // build the vertex data interface block definition:
     std::string vertdata;
@@ -253,14 +345,12 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
     // Build the vertex shader.
     if ( hasVS )
     {
-        stages |= ShaderComp::STAGE_VERTEX;
+        stages |= VirtualProgram::STAGE_VERTEX;
 
         std::stringstream buf;
 
-        buf << "#version " << vs_glsl_version << "\n"
-            GLSL_DEFAULT_PRECISION_FLOAT << "\n"
-            "#pragma vp_name VP Vertex Shader Main\n"
-            << (!s_GLES_SHADERS ? "#extension GL_ARB_gpu_shader5 : enable \n" : "");
+        buf << getGLSLHeader() << "\n"
+            "#pragma vp_name VP Vertex Shader Main \n";
 
         addExtensionsToBuffer(buf, in_extensions);
 
@@ -288,21 +378,39 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
             }
         }
 
-        // prototypes for view stage methods:
-        if ( viewStage != 0L && viewStageInVS )
+        if (viewStageInVS)
         {
-            for( OrderedFunctionMap::const_iterator i = viewStage->begin(); i != viewStage->end(); ++i )
+            if (xformModelToView)
             {
-                buf << "void " << i->second._name << "(inout vec4); \n";
+                for (auto& iter : *xformModelToView)
+                    buf << "void " << iter.second._name << "();\n";
+            }
+
+            // prototypes for view stage methods:
+            if (viewStage)
+            {
+                for (OrderedFunctionMap::const_iterator i = viewStage->begin(); i != viewStage->end(); ++i)
+                {
+                    buf << "void " << i->second._name << "(inout vec4); \n";
+                }
             }
         }
 
-        // prototypes for clip stage methods:
-        if ( clipStage != 0L && clipStageInVS )
+        if (clipStageInVS)
         {
-            for( OrderedFunctionMap::const_iterator i = clipStage->begin(); i != clipStage->end(); ++i )
+            if (xformModelToView)
             {
-                buf << "void " << i->second._name << "(inout vec4); \n";
+                for (auto& iter : *xformModelToView)
+                    buf << "void " << iter.second._name << "();\n";
+            }
+
+            // prototypes for clip stage methods:
+            if (clipStage != 0L)
+            {
+                for (OrderedFunctionMap::const_iterator i = clipStage->begin(); i != clipStage->end(); ++i)
+                {
+                    buf << "void " << i->second._name << "(inout vec4); \n";
+                }
             }
         }
 
@@ -325,9 +433,19 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
         {
             if ( viewStage )
             {
-                buf <<
-                    INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex; \n"
-                    INDENT << "vp_Normal = normalize(" << gl_NormalMatrix    << " * vp_Normal); \n";
+                if (xformModelToView)
+                {
+                    buf <<
+                        INDENT << xformModelToView->begin()->second._name << "();\n";
+                }
+                else
+                {
+                    buf <<
+                        INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex; \n"
+                        INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                }
+
+                buf << INDENT << "vp_VertexView = vp_Vertex.xyz;\n";
 
                 for( OrderedFunctionMap::const_iterator i = viewStage->begin(); i != viewStage->end(); ++i )
                 {
@@ -345,9 +463,20 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
                     }
                     else
                     {
-                        buf <<
-                            INDENT << "vp_Vertex = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n"
-                            INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                        if (xformModelToView)
+                        {
+                            buf <<
+                                INDENT << xformModelToView->begin()->second._name << "();\n"
+                                INDENT << "vp_VertexView = vp_Vertex.xyz;\n"
+                                INDENT << "vp_Vertex = " << gl_ProjectionMatrix << " * vp_Vertex;\n";
+                        }
+                        else
+                        {
+                            buf <<
+                                INDENT << "vp_VertexView = (" << gl_ModelViewMatrix << " * vp_Vertex).xyz; \n"
+                                INDENT << "vp_Vertex = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n"
+                                INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                        }
                     }
 
                     for( OrderedFunctionMap::const_iterator i = clipStage->begin(); i != clipStage->end(); ++i )
@@ -366,7 +495,7 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
                 buf << INDENT "gl_Position = vp_Vertex; \n";
             else if ( viewStage )
                 buf << INDENT "gl_Position = " << gl_ProjectionMatrix << " * vp_Vertex; \n";
-            else
+            else // modelstage
                 buf << INDENT "gl_Position = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n";
         }
 
@@ -393,38 +522,14 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
 
 
     //.................................................................................
-    
-#if !defined(OSG_GL_FIXED_FUNCTION_AVAILABLE)
-
-    // for all stages EXCEPT vertex, we will switch over to the OSG aliased
-    // matrix uniforms. Why except vertex? OSG [3.4] does something internally to
-    // convert these for hte VERTEX shader stage only... and if you try to 
-    // use them anyway, they won't work :(
-
-    gl_ModelViewMatrix           = "osg_ModelViewMatrix",
-    gl_ProjectionMatrix          = "osg_ProjectionMatrix",
-    gl_ModelViewProjectionMatrix = "osg_ModelViewProjectionMatrix",
-    gl_NormalMatrix              = "osg_NormalMatrix",
-    gl_FrontColor                = "osg_FrontColor";
-    
-    glMatrixUniforms =
-        "uniform mat4 osg_ModelViewMatrix;\n"
-        "uniform mat4 osg_ModelViewProjectionMatrix;\n"
-        "uniform mat4 osg_ProjectionMatrix;\n"
-        "uniform mat3 osg_NormalMatrix;\n";
-#endif
-
 
     if ( hasTCS )
     {
-        stages |= ShaderComp::STAGE_TESSCONTROL;
+        stages |= VirtualProgram::STAGE_TESSCONTROL;
         std::stringstream buf;
 
-        buf << "#version " << tcs_glsl_version << "\n"
-            << GLSL_DEFAULT_PRECISION_FLOAT << "\n"
-            << "#pragma vp_name VP Tessellation Control Shader (TCS) Main\n"
-            // For gl_MaxPatchVertices
-            << (!s_GLES_SHADERS ? "#extension GL_NV_gpu_shader5 : enable\n" : "");
+        buf << getGLSLHeader() << "\n"
+            << "#pragma vp_name VP Tessellation Control Shader (TCS) Main\n";
 
         addExtensionsToBuffer(buf, in_extensions);
 
@@ -498,12 +603,11 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
 
     if ( hasTES )
     {
-        stages |= ShaderComp::STAGE_TESSEVALUATION;
+        stages |= VirtualProgram::STAGE_TESSEVALUATION;
 
         std::stringstream buf;
 
-        buf << "#version " << tes_glsl_version << "\n"
-            << GLSL_DEFAULT_PRECISION_FLOAT << "\n"
+        buf << getGLSLHeader() << "\n"
             << "#pragma vp_name VP Tessellation Evaluation (TES) Shader MAIN\n";
 
         addExtensionsToBuffer(buf, in_extensions);
@@ -553,6 +657,12 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
                 }
             }
 
+            if (xformModelToView)
+            {
+                for (auto& iter : *xformModelToView)
+                    buf << "void " << iter.second._name << "();\n";
+            }
+
             if (viewStage && viewStageInTES)
             {
                 for( OrderedFunctionMap::const_iterator i = viewStage->begin(); i != viewStage->end(); ++i )
@@ -583,7 +693,7 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
                 << "{ \n";            
             for(Variables::const_iterator i = vars.begin(); i != vars.end(); ++i)
             {
-                if ( i->interp != "flat" )
+                if ( i->interp != "flat" )                     
                 {
                     if ( i->arraySize == 0 )
                     {
@@ -617,8 +727,19 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
 
             if ( viewStage && viewStageInTES )
             {
-                buf << INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex; \n"
-                    << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                if (xformModelToView)
+                {
+                    buf <<
+                        INDENT << xformModelToView->begin()->second._name << "();\n";
+                }
+                else
+                {
+                    buf << INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex; \n"
+                        << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                }
+
+                buf << INDENT << "vp_VertexView = vp_Vertex.xyz;\n";
+
                 space = SPACE_VIEW;
 
                 for( OrderedFunctionMap::const_iterator i = viewStage->begin(); i != viewStage->end(); ++i )
@@ -629,11 +750,24 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
 
             if ( clipStage && clipStageInTES )
             {
-                if ( space == SPACE_MODEL )
-                    buf << INDENT << "vp_Vertex = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n"
-                    << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
-                else if ( space == SPACE_VIEW )
+                if (space == SPACE_MODEL)
+                {
+                    if (xformModelToView)
+                    {
+                        buf << INDENT << xformModelToView->begin()->second._name << "();\n";
+                    }
+                    else
+                    {
+                        buf << INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex; \n"
+                            << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                    }
+                    buf << INDENT << "vp_VertexView = vp_Vertex.xyz; \n";
+                    buf << INDENT << "vp_Vertex = " << gl_ProjectionMatrix << " * vp_Vertex;\n";
+                }
+                else if (space == SPACE_VIEW)
+                {
                     buf << INDENT << "vp_Vertex = " << gl_ProjectionMatrix << " * vp_Vertex; \n";
+                }
 
                 space = SPACE_CLIP;
 
@@ -646,11 +780,27 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
             // resolve vertex to its next space, but ONLY if this is the final Vertex Processing stage.
             if ( !hasGS )
             {
-                if ( space == SPACE_MODEL )
-                    buf << INDENT << "vp_Vertex = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n"
-                        << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
-                else if ( space == SPACE_VIEW )
+                if (space == SPACE_MODEL)
+                {
+                    if (xformModelToView)
+                    {
+                        buf << INDENT << xformModelToView->begin()->second._name << "();\n";
+                    }
+                    else
+                    {
+                        buf << INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex; \n"
+                            << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                    }
+                    buf << INDENT << "vp_VertexView = vp_Vertex.xyz; \n";
+                    buf << INDENT << "vp_Vertex = " << gl_ProjectionMatrix << " * vp_Vertex;\n";
+                    //buf << INDENT << "vp_VertexView = (" << gl_ModelViewMatrix << " * vp_Vertex).xyz; \n"
+                    //    << INDENT << "vp_Vertex = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n"
+                    //    << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                }
+                else if (space == SPACE_VIEW)
+                {
                     buf << INDENT << "vp_Vertex = " << gl_ProjectionMatrix << " * vp_Vertex; \n";
+                }
             }
         
             // Copy globals to output block:
@@ -693,21 +843,19 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
 
     //.................................................................................
 
-
     // Build the geometry shader.
     if ( hasGS )
     {
-        stages |= ShaderComp::STAGE_GEOMETRY;
+        stages |= VirtualProgram::STAGE_GEOMETRY;
 
         std::stringstream buf;
 
-        buf << "#version " << gs_glsl_version << "\n"
-            << GLSL_DEFAULT_PRECISION_FLOAT << "\n"
+        buf << getGLSLHeader() << "\n"
             << "#pragma vp_name VP Geometry Shader Main\n";
 
         addExtensionsToBuffer(buf, in_extensions);
 
-        buf << glMatrixUniforms << "\n";
+        //buf << glMatrixUniforms << "\n";
 
         if ( hasVS || hasTCS || hasTES )
         {
@@ -726,6 +874,12 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
         if ( geomStage || (viewStage && viewStageInGS) || (clipStage && clipStageInGS) )
         {
             buf << "\n// Injected function declarations:\n";
+
+            if (xformModelToView)
+            {
+                buf << INDENT << "void " << xformModelToView->begin()->second._name << "();\n";
+            }
+
             if ( geomStage )
             {
                 for( OrderedFunctionMap::const_iterator i = geomStage->begin(); i != geomStage->end(); ++i )
@@ -768,8 +922,16 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
         int space = SPACE_MODEL;
         if ( viewStage && viewStageInGS )
         {
-            buf << INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex;\n"
-                << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+            if (xformModelToView)
+            {
+                buf << INDENT << xformModelToView->begin()->second._name << "();\n";
+            }
+            else
+            {
+                buf << INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex; \n"
+                    << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+            }
+            buf << INDENT << "vp_VertexView = vp_Vertex.xyz; \n";
 
             space = SPACE_VIEW;
 
@@ -783,8 +945,20 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
         {
             if ( space == SPACE_MODEL )
             {
-                buf << INDENT << "vp_Vertex = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n"
-                    << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                if (xformModelToView)
+                {
+                    buf << INDENT << xformModelToView->begin()->second._name << "();\n";
+                }
+                else
+                {
+                    buf << INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex; \n"
+                        << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+                }
+                buf << INDENT << "vp_VertexView = vp_Vertex.xyz; \n";
+                buf << INDENT << "vp_Vertex = " << gl_ProjectionMatrix << " * vp_Vertex;\n";
+                //buf << INDENT << "vp_VertexView = (" << gl_ModelViewMatrix << " * vp_Vertex).xyz; \n"
+                //    << INDENT << "vp_Vertex = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n"
+                //    << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
             }
             else if ( space == SPACE_VIEW )
             {
@@ -802,8 +976,20 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
         // resolve vertex to its next space:
         if ( space == SPACE_MODEL )
         {
-            buf << INDENT << "vp_Vertex = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n"
-                << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+            if (xformModelToView)
+            {
+                buf << INDENT << xformModelToView->begin()->second._name << "();\n";
+            }
+            else
+            {
+                buf << INDENT << "vp_Vertex = " << gl_ModelViewMatrix << " * vp_Vertex; \n"
+                    << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
+            }
+            buf << INDENT << "vp_VertexView = vp_Vertex.xyz; \n";
+            buf << INDENT << "vp_Vertex = " << gl_ProjectionMatrix << " * vp_Vertex;\n";
+            //buf << INDENT << "vp_VertexView = (" << gl_ModelViewMatrix << " * vp_Vertex).xyz; \n"
+            //    << INDENT << "vp_Vertex = " << gl_ModelViewProjectionMatrix << " * vp_Vertex; \n"
+            //    << INDENT << "vp_Normal = normalize(" << gl_NormalMatrix << " * vp_Normal); \n";
         }
         else if ( space == SPACE_VIEW )
         {
@@ -890,14 +1076,12 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
     // Build the Fragment shader.
     if ( hasFS )
     {
-        stages |= ShaderComp::STAGE_FRAGMENT;
+        stages |= VirtualProgram::STAGE_FRAGMENT;
 
         std::stringstream buf;
 
-        buf << "#version " << fs_glsl_version << "\n"
-            << GLSL_DEFAULT_PRECISION_FLOAT << "\n"
-            << "#pragma vp_name VP Fragment Shader Main\n"
-            << (!s_GLES_SHADERS ? "#extension GL_ARB_gpu_shader5 : enable \n" : "");
+        buf << getGLSLHeader() << "\n"
+            << "#pragma vp_name VP Fragment Shader Main\n";
 
         addExtensionsToBuffer(buf, in_extensions);
 
@@ -957,8 +1141,8 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
 
         buf << INDENT << "vp_Normal = normalize(vp_Normal); \n";
 
-        int coloringPass = _fragStageOrder == FRAGMENT_STAGE_ORDER_COLORING_LIGHTING ? 0 : 1;
-        int lightingPass = 1-coloringPass;
+        constexpr int coloringPass = 0;
+        constexpr int lightingPass = 1;
 
         for(int pass=0; pass<2; ++pass)
         {
@@ -1006,12 +1190,12 @@ ShaderFactory::createMains(const ShaderComp::FunctionLocationMap&    functions,
 
 
 osg::Shader*
-ShaderFactory::createColorFilterChainFragmentShader(const std::string&      function, 
-                                                    const ColorFilterChain& chain ) const
+ShaderFactory::createColorFilterChainFragmentShader(
+    const std::string& function,
+    const ColorFilterChain& chain ) const
 {
     std::stringstream buf;
-    buf << 
-        "#version " GLSL_VERSION_STR "\n" << GLSL_DEFAULT_PRECISION_FLOAT "\n";
+    buf << getGLSLHeader() << "\n";
 
     // write out the shader function prototypes:
     for( ColorFilterChain::const_iterator i = chain.begin(); i != chain.end(); ++i )
@@ -1035,6 +1219,7 @@ ShaderFactory::createColorFilterChainFragmentShader(const std::string&      func
 
     std::string bufstr;
     bufstr = buf.str();
+    
     return new osg::Shader(osg::Shader::FRAGMENT, bufstr);
 }
 

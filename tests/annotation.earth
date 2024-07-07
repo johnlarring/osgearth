@@ -1,15 +1,14 @@
 <!--
 osgEarth Sample - Annotations
 -->
-<map name="readymap.org" type="geocentric" version="2">
+<map name="Annotations Demo">
 
-    <image name="ReadyMap.org - Imagery" driver="tms">
-        <url>http://readymap.org/readymap/tiles/1.0.0/7/</url>
-    </image>
+    <options>
+        <overlay_blending_source>alpha</overlay_blending_source>
+    </options>
 
-    <elevation name="ReadyMap.org - Elevation" driver="tms">
-        <url>http://readymap.org/readymap/tiles/1.0.0/116/</url>
-    </elevation>
+    <xi:include href="readymap_imagery.xml"/>
+    <xi:include href="readymap_elevation.xml"/>
 
     <viewpoints>
         <viewpoint name="Annotation Samples"
@@ -17,7 +16,7 @@ osgEarth Sample - Annotations
                    heading="35.27" pitch="-35" />
     </viewpoints>
 
-    <annotations name="Annotations Group A">
+    <Annotations name="Annotations Group A">
 
         <label text="Label">
             <position lat="34" long="-120" />
@@ -102,9 +101,9 @@ osgEarth Sample - Annotations
             </style>
         </ellipse>
         <label text="HAT Ellipse" lat="40" long="-100.0"/>
-    </annotations>
+    </Annotations>
 
-    <annotations name="Annotations Group B">
+    <Annotations name="Annotations Group B">
 
         <ellipse name="ellipse extruded">
             <position lat="32" long="-100.0"/>
@@ -144,6 +143,7 @@ osgEarth Sample - Annotations
                 stroke-width:        3;
                 stroke-tessellation-size: 1km;
                 altitude-clamping:   terrain-gpu;
+                render-depth-offset: true;
             </style>
         </feature>
         <label text="GPU-Clamped Line" lat="44" long="-115">
@@ -187,6 +187,13 @@ osgEarth Sample - Annotations
         </imageoverlay>
         <label text="ImageOverlay" lat="26" long="-81"/>
 
+        <imageoverlay>
+            <url>../data/fractal.png</url>
+            <alpha>0.75</alpha>
+            <geometry>POLYGON((-81 28, -80.5 28, -80.5 28.5, -81 28.5))</geometry>
+        </imageoverlay>
+        <label text="ImageOverlay(alpha)" lat="28" long="-81"/>
+
         <local_geometry name="3D geometry">
             <geometry>
                 POLYGON((0 0 0, -25000 0 45000, 0 0 75000, 25000 0 45000))
@@ -208,12 +215,12 @@ osgEarth Sample - Annotations
                 LINESTRING(10 0, 10 65)
             </geometry>
             <style type="text/css">
-                stroke:              #ffff00;
-                stroke-width:        3;
+                stroke: #ffff00;
+                stroke-width: 3;
                 stroke-tessellation-size: 1km;
-                altitude-clamping:   terrain;
-                altitude-technique:  gpu;
-                render-lighting:     false;
+                altitude-offset: 10000;
+                render-lighting: false;
+                render-depth-offset: true;
             </style>
         </feature>
 
@@ -224,5 +231,19 @@ osgEarth Sample - Annotations
             </style>
         </label>
 
-    </annotations>
+        <feature name="Antimeridian polygon">
+            <srs>wgs84</srs>
+            <geometry>
+                POLYGON((-160 -30 0, 150 -20 0, 160 -45 0, -150 -40 0))
+            </geometry>
+            <style type="text/css">
+                stroke: #00ff00;
+                stroke-width: 3;
+                stroke-tessellation-size: 100km;
+            </style>
+        </feature>
+        <label text="Antimeridian polygon" lat="-30" long="-180"/>
+
+
+    </Annotations>
 </map>

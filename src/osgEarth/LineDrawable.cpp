@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -46,7 +46,7 @@ using namespace osgEarth;
 #define LC "[LineGroup] "
 
 // Comment this out to test the non-GLSL path
-#define USE_GPU
+//#define USE_GPU
 
 namespace osgEarth { namespace Serializers { namespace LineGroup
 {
@@ -54,7 +54,7 @@ namespace osgEarth { namespace Serializers { namespace LineGroup
         LineGroup,
         new osgEarth::LineGroup,
         osgEarth::LineGroup,
-        "osg::Object osg::Node osg::Group osg::Geode osgEarth::LineGroup")
+        "osg::Object osg::Node osg::Group osgEarth::LineGroup")
     {
         // no properties
     }
@@ -66,7 +66,7 @@ LineGroup::LineGroup()
 }
 
 LineGroup::LineGroup(const LineGroup& rhs, const osg::CopyOp& copy) :
-osg::Geode(rhs, copy)
+osg::Group(rhs, copy)
 {
     //nop
 }
@@ -186,7 +186,7 @@ namespace
         }
     };
 
-    
+
 
     struct ImportLinesVisitor : public osg::NodeVisitor
     {
@@ -286,10 +286,10 @@ LineGroup::optimize()
     osg::ref_ptr<StateSetCache> cache = new StateSetCache();
     cache->optimize(this);
 
-    // Merge all non-dynamic drawables to reduce the total number of 
+    // Merge all non-dynamic drawables to reduce the total number of
     // OpenGL calls.
     osgUtil::Optimizer::MergeGeometryVisitor mg;
-    mg.setTargetMaximumNumberOfVertices(65536);
+    mg.setTargetMaximumNumberOfVertices(Registry::instance()->getMaxNumberOfVertsPerDrawable());
     accept(mg);
 }
 
@@ -314,12 +314,14 @@ namespace osgEarth { namespace Serializers { namespace LineDrawable
         "osg::Object osg::Node osg::Drawable osg::Geometry osgEarth::LineDrawable")
     {
         ADD_UINT_SERIALIZER( Mode, GL_LINE_STRIP );
+        ADD_BOOL_SERIALIZER( UseGPU, true );
         ADD_INT_SERIALIZER( StippleFactor, 1 );
         ADD_USHORT_SERIALIZER( StipplePattern, 0xFFFF );
         ADD_VEC4_SERIALIZER( Color, osg::Vec4(1,1,1,1) );
         ADD_FLOAT_SERIALIZER( LineWidth, 1.0f );
         ADD_UINT_SERIALIZER( First, 0u );
         ADD_UINT_SERIALIZER( Count, 0u );
+        ADD_FLOAT_SERIALIZER(StippleQuantize, 8.0f);
     }
 } } }
 
@@ -327,12 +329,14 @@ namespace osgEarth { namespace Serializers { namespace LineDrawable
 int LineDrawable::PreviousVertexAttrLocation = 9;
 int LineDrawable::NextVertexAttrLocation = 10;
 
+#if 0
 LineDrawable::LineDrawable() :
-osg::Geometry(),
+osg::Drawable(),
 _mode(GL_LINE_STRIP),
-_gpu(false),
+_useGPU(true),
 _factor(1),
 _pattern(0xFFFF),
+_quantize(8.0f),
 _color(1, 1, 1, 1),
 _width(1.0f),
 _smooth(false),
@@ -343,18 +347,28 @@ _previous(NULL),
 _next(NULL),
 _colors(NULL)
 {
-#ifdef USE_GPU
-    _gpu = Registry::capabilities().supportsGLSL();
-    setupShaders();
-#endif
+    setUseVertexArrayObject(false);
+    setUseVertexBufferObjects(false);
+    setUseDisplayList(false);
+
+    if (!Registry::capabilities().supportsGLSL())
+        _useGPU = false;
+
+    if (_mode != GL_LINES && _mode != GL_LINE_STRIP && _mode != GL_LINE_LOOP)
+        _useGPU = false;
+
+    if (_useGPU)
+        setupShaders();
 }
+#endif
 
 LineDrawable::LineDrawable(GLenum mode) :
-osg::Geometry(),
+osg::Drawable(),
 _mode(mode),
-_gpu(false),
+_useGPU(true),
 _factor(1),
 _pattern(0xFFFF),
+_quantize(8.0f),
 _color(1,1,1,1),
 _width(1.0f),
 _smooth(false),
@@ -365,22 +379,32 @@ _previous(NULL),
 _next(NULL),
 _colors(NULL)
 {
-#ifdef USE_GPU
-    _gpu = 
-        Registry::capabilities().supportsGLSL() &&
-        (_mode == GL_LINES || _mode == GL_LINE_STRIP || _mode == GL_LINE_LOOP);
+    setUseVertexArrayObject(false);
+    setUseVertexBufferObjects(false);
 
-    setupShaders();
-#endif
+    _geom = new osg::Geometry();
+    _geom->setName(typeid(*this).name());
+    _geom->setUseVertexBufferObjects(true);
+    _geom->setUseDisplayList(false);
+
+    if (!Registry::capabilities().supportsGLSL())
+        _useGPU = false;
+
+    if (_mode != GL_LINES && _mode != GL_LINE_STRIP && _mode != GL_LINE_LOOP)
+        _useGPU = false;
+
+    if (_useGPU)
+        setupShaders();
 }
 
 LineDrawable::LineDrawable(const LineDrawable& rhs, const osg::CopyOp& copy) :
-osg::Geometry(rhs, copy),
+osg::Drawable(rhs, copy),
 _mode(rhs._mode),
-_gpu(rhs._gpu),
+_useGPU(rhs._useGPU),
 _color(rhs._color),
 _factor(rhs._factor),
 _pattern(rhs._pattern),
+_quantize(rhs._quantize),
 _width(rhs._width),
 _smooth(rhs._smooth),
 _first(rhs._first),
@@ -390,20 +414,32 @@ _previous(NULL),
 _next(NULL),
 _colors(NULL)
 {
-    _current = static_cast<osg::Vec3Array*>(getVertexArray());
+    _geom = osg::clone(rhs._geom.get(), copy);
 
-    if (_gpu)
+    _current = static_cast<osg::Vec3Array*>(_geom->getVertexArray());
+
+    if (_useGPU)
     {
-        _previous = static_cast<osg::Vec3Array*>(getVertexAttribArray(PreviousVertexAttrLocation));
-        _next = static_cast<osg::Vec3Array*>(getVertexAttribArray(NextVertexAttrLocation));
+        _previous = static_cast<osg::Vec3Array*>(_geom->getVertexAttribArray(PreviousVertexAttrLocation));
+        _next = static_cast<osg::Vec3Array*>(_geom->getVertexAttribArray(NextVertexAttrLocation));
+        setupShaders();
     }
-
-    setupShaders();
 }
 
 LineDrawable::~LineDrawable()
 {
     //nop
+}
+
+void
+LineDrawable::setUseGPU(bool value)
+{
+    _current = NULL;
+    _previous = NULL;
+    _next = NULL;
+
+    _useGPU = value;
+    initialize();
 }
 
 void
@@ -413,12 +449,18 @@ LineDrawable::initialize()
     if (_current)
         return;
 
+    // Blow away any existing data (e.g. user vertex attrib arrays)
+    osg::Geometry::ArrayList arrays;
+    _geom->getArrayList(arrays);
+    for (auto& array_ref : arrays)
+        array_ref->resizeArray(0u);
+
     // See if the arrays already exist:
-    _current = static_cast<osg::Vec3Array*>(getVertexArray());
-    if (_gpu)
+    _current = static_cast<osg::Vec3Array*>(_geom->getVertexArray());
+    if (_useGPU)
     {
-        _previous = static_cast<osg::Vec3Array*>(getVertexAttribArray(PreviousVertexAttrLocation));
-        _next = static_cast<osg::Vec3Array*>(getVertexAttribArray(NextVertexAttrLocation));
+        _previous = static_cast<osg::Vec3Array*>(_geom->getVertexAttribArray(PreviousVertexAttrLocation));
+        _next = static_cast<osg::Vec3Array*>(_geom->getVertexAttribArray(NextVertexAttrLocation));
     }
 
     setUseVertexBufferObjects(_supportsVertexBufferObjects);
@@ -428,25 +470,27 @@ LineDrawable::initialize()
     {
         _current = new osg::Vec3Array();
         _current->setBinding(osg::Array::BIND_PER_VERTEX);
-        setVertexArray(_current);
+        _geom->setVertexArray(_current);
 
         _colors = new osg::Vec4Array();
         _colors->setBinding(osg::Array::BIND_PER_VERTEX);
-        setColorArray(_colors);
+        _geom->setColorArray(_colors);
 
-        if (_gpu)
+        if (_useGPU)
         {
             _previous = new osg::Vec3Array();
             _previous->setBinding(osg::Array::BIND_PER_VERTEX);
             _previous->setNormalize(false);
-            setVertexAttribArray(PreviousVertexAttrLocation, _previous);  
+            _geom->setVertexAttribArray(PreviousVertexAttrLocation, _previous);
 
             _next = new osg::Vec3Array();
             _next->setBinding(osg::Array::BIND_PER_VERTEX);
             _next->setNormalize(false);
-            setVertexAttribArray(NextVertexAttrLocation, _next);
+            _geom->setVertexAttribArray(NextVertexAttrLocation, _next);
         }
     }
+
+    setupShaders();
 }
 
 void
@@ -495,6 +539,16 @@ LineDrawable::setStippleFactor(GLint factor)
 }
 
 void
+LineDrawable::setStippleQuantize(GLfloat value)
+{
+    if (_quantize != value)
+    {
+        _quantize = value;
+        getOrCreateStateSet()->setDefine("OE_LINE_QUANTIZE", std::to_string(_quantize));
+    }
+}
+
+void
 LineDrawable::setLineSmooth(bool value)
 {
     if (_smooth != value)
@@ -507,48 +561,96 @@ LineDrawable::setLineSmooth(bool value)
 void
 LineDrawable::setColor(const osg::Vec4& color)
 {
-    if (_color != color)
-    {
-        initialize();
+    initialize();
 
-        _color = color;
-        if (_colors && !_colors->empty())
-        {
-            _colors->assign(_colors->size(), _color);
-            _colors->dirty();
-        }
+    // if we've already called dirty() that means we are editing a completed
+    // drawable and therefore need dynamic variance.
+    if (_geom->getNumPrimitiveSets() > 0u && _geom->getDataVariance() != DYNAMIC)
+    {
+        _geom->setDataVariance(DYNAMIC);
+    }
+
+    _color = color;
+    if (_colors && !_colors->empty())
+    {
+        _colors->assign(_colors->size(), _color);
+        _colors->dirty();
     }
 }
 
 void
 LineDrawable::setColor(unsigned vi, const osg::Vec4& color)
 {
-    if (_gpu)
+    // if we've already called dirty() that means we are editing a completed
+    // drawable and therefore need dynamic variance.
+    if (_geom->getNumPrimitiveSets() > 0u && _geom->getDataVariance() != DYNAMIC)
+    {
+        _geom->setDataVariance(DYNAMIC);
+    }
+
+    bool dirty = false;
+    if (_useGPU)
     {
         if (_mode == GL_LINE_STRIP || _mode == GL_LINE_LOOP)
         {
             if (vi == 0)
             {
                 for (unsigned i=0; i<2; ++i)
-                    (*_colors)[i] = color;
+                {
+                    if ((*_colors)[i] != color)
+                    {
+                        (*_colors)[i] = color;
+                        dirty = true;
+                    }
+                }
                 for (unsigned i=_colors->size()-2; i<_colors->size(); ++i)
-                    (*_colors)[i] = color;
+                {
+                    if ((*_colors)[i] != color)
+                    {
+                        (*_colors)[i] = color;
+                        dirty = true;
+                    }
+                }
             }
             else
+            {
                 for (unsigned i=vi*4-2; i<vi*4+2; ++i)
-                    (*_colors)[i] = color;
+                {
+                    if ((*_colors)[i] != color)
+                    {
+                        (*_colors)[i] = color;
+                        dirty = true;
+                    }
+                }
+            }
         }
-        else
+        else // GL_LINES
         {
-            (*_colors)[vi*2u] = color;
-            (*_colors)[vi*2u+1] = color;
+            if ((*_colors)[vi*2u] != color)
+            {
+                (*_colors)[vi*2u] = color;
+                dirty = true;
+            }
+            if ((*_colors)[vi*2u+1] != color)
+            {
+                (*_colors)[vi*2u+1] = color;
+                dirty = true;
+            }
         }
     }
     else
     {
-        (*_colors)[vi] = color;
+        if ((*_colors)[vi] != color)
+        {
+            (*_colors)[vi] = color;
+            dirty = true;
+        }
     }
-    _colors->dirty();
+
+    if (dirty)
+    {
+        _colors->dirty();
+    }
 }
 
 void
@@ -580,7 +682,7 @@ LineDrawable::getCount() const
 void
 LineDrawable::updateFirstCount()
 {
-    if (_gpu)
+    if (_useGPU)
     {
         osg::StateSet* ss = getOrCreateStateSet();
         ss->setDataVariance(ss->DYNAMIC);
@@ -603,9 +705,9 @@ LineDrawable::updateFirstCount()
     }
     else
     {
-        if (getNumPrimitiveSets() > 0)
+        if (_geom->getNumPrimitiveSets() > 0)
         {
-            osg::DrawArrays* da = dynamic_cast<osg::DrawArrays*>(getPrimitiveSet(0));
+            osg::DrawArrays* da = dynamic_cast<osg::DrawArrays*>(_geom->getPrimitiveSet(0));
             if (da)
             {
                 da->setFirst(_first);
@@ -620,7 +722,7 @@ LineDrawable::pushVertex(const osg::Vec3& vert)
 {
     initialize();
 
-    if (_gpu)
+    if (_useGPU)
     {
         if (_mode == GL_LINE_STRIP)
         {
@@ -745,19 +847,19 @@ LineDrawable::setVertex(unsigned vi, const osg::Vec3& vert)
 
     // if we've already called dirty() that means we are editing a completed
     // drawable and therefore need dynamic variance.
-    if (getNumPrimitiveSets() > 0u && getDataVariance() != DYNAMIC)
+    if (_geom->getNumPrimitiveSets() > 0u && _geom->getDataVariance() != DYNAMIC)
     {
-        setDataVariance(DYNAMIC);
+        _geom->setDataVariance(DYNAMIC);
     }
 
     unsigned size = _current->size();
     unsigned numVerts = getNumVerts();
-    
+
     // "vi" = virtual index, "ri" = real index.
 
     if (vi < numVerts)
     {
-        if (_gpu)
+        if (_useGPU)
         {
             if (_mode == GL_LINE_STRIP)
             {
@@ -766,7 +868,10 @@ LineDrawable::setVertex(unsigned vi, const osg::Vec3& vert)
 
                 // update the main verts:
                 for (unsigned n = ri; n < ri+rnum; ++n)
+                {
                     (*_current)[n] = vert;
+                }
+                _current->dirty();
 
                 // update next/previous verts:
                 if (numVerts == 1u)
@@ -775,22 +880,47 @@ LineDrawable::setVertex(unsigned vi, const osg::Vec3& vert)
                     {
                         (*_next)[i] = (*_previous)[i] = vert;
                     }
+                    _next->dirty();
+                    _previous->dirty();
                 }
-                else 
+                else
                 {
-                    unsigned rni = vi==0u? 0u : ri-4u;
-                    unsigned rpi = vi==numVerts-1 ? ri : ri+4u;
-
-                    for(unsigned n=0; n<rnum; ++n)
+                    if (vi > 0u)
                     {
-                        (*_next)[rni+n] = vert;
-                        (*_previous)[rpi+n] = vert;
+                        unsigned rni = ri-4u;
+                        for (unsigned n = 0; n < rnum; ++n)
+                        {
+                            (*_next)[rni + n] = vert;
+                        }
+                        _next->dirty();
+                    }
+                    else // if vi == 0
+                    {
+                        for (unsigned n = 0; n < rnum; ++n)
+                        {
+                            (*_previous)[n] = vert;
+                        }
+                        _previous->dirty();
+                    }
+
+                    if (vi < numVerts-1)
+                    {
+                        unsigned rpi = ri+4u;
+                        for (unsigned n = 0; n < rnum; ++n)
+                        {
+                            (*_previous)[rpi + n] = vert;
+                        }
+                        _previous->dirty();
+                    }
+                    else // if (vi == numVerts-1)
+                    {
+                        for (unsigned n = 0; n < rnum; ++n)
+                        {
+                            (*_next)[ri+n] = vert;
+                        }
+                        _next->dirty();
                     }
                 }
-                
-                _current->dirty();
-                _next->dirty();
-                _previous->dirty();
             }
 
             else if (_mode == GL_LINE_LOOP)
@@ -800,7 +930,10 @@ LineDrawable::setVertex(unsigned vi, const osg::Vec3& vert)
 
                 // update the main verts:
                 for (unsigned n = ri; n < ri+rnum; ++n)
+                {
                     (*_current)[n] = vert;
+                }
+                _current->dirty();
 
                 // update next/previous verts:
                 if (numVerts == 1u)
@@ -810,10 +943,10 @@ LineDrawable::setVertex(unsigned vi, const osg::Vec3& vert)
                         (*_next)[i] = (*_previous)[i] = vert;
                     }
                 }
-                else 
+                else
                 {
-                    unsigned rni = vi==0u? numVerts-4u : ri-4u;
-                    unsigned rpi = vi==numVerts-1u ? 0u : ri+4u;
+                    unsigned rni = vi == 0u ? (numVerts - 1u) * 4u : ri - 4u;
+                    unsigned rpi = vi == numVerts - 1u ? 0u : ri + 4u;
 
                     for(unsigned n=0; n<rnum; ++n)
                     {
@@ -821,8 +954,7 @@ LineDrawable::setVertex(unsigned vi, const osg::Vec3& vert)
                         (*_previous)[rpi+n] = vert;
                     }
                 }
-                
-                _current->dirty();
+
                 _next->dirty();
                 _previous->dirty();
             }
@@ -874,7 +1006,7 @@ LineDrawable::getVertex(unsigned index) const
 unsigned
 LineDrawable::getRealIndex(unsigned index) const
 {
-    if (_gpu)
+    if (_useGPU)
         return (_mode == GL_LINE_STRIP || _mode == GL_LINE_LOOP) ? index*4u : index*2u;
     else
         return index;
@@ -889,7 +1021,7 @@ LineDrawable::importVertexArray(const osg::Vec3Array* verts)
     _colors->clear();
     if (verts && verts->size() > 0)
     {
-        if (_gpu)
+        if (_useGPU)
         {
             _previous->clear();
             _next->clear();
@@ -939,7 +1071,7 @@ LineDrawable::getNumVerts() const
     if (!_current || _current->empty())
         return 0u;
 
-    if (_gpu)
+    if (_useGPU)
     {
         if (_mode == GL_LINE_STRIP || _mode == GL_LINE_LOOP)
             return _current->size()/4; //_current->size() == 2 ? 1 : (_current->size()+2)/4;
@@ -955,10 +1087,10 @@ LineDrawable::getNumVerts() const
 unsigned
 LineDrawable::actualVertsPerVirtualVert(unsigned index) const
 {
-    if (_gpu)
+    if (_useGPU)
         if (_mode == GL_LINE_STRIP || _mode == GL_LINE_LOOP)
             return 4u; //index == 0u? 2u : 4u;
-        else 
+        else
             return 2u;
     else
         return 1u;
@@ -971,7 +1103,7 @@ LineDrawable::numVirtualVerts(const osg::Array* a) const
     if (n == 0u)
         return 0u;
 
-    if (_gpu)
+    if (_useGPU)
         if (_mode == GL_LINE_STRIP || _mode == GL_LINE_LOOP)
             return n/4u; //n == 2u ? 1u : (n+2u)/4u;
         else
@@ -986,17 +1118,17 @@ LineDrawable::reserve(unsigned size)
     initialize();
 
     unsigned actualSize = size;
-    if (_gpu)
+    if (_useGPU)
     {
         actualSize = (_mode == GL_LINE_STRIP || _mode == GL_LINE_LOOP) ? size*4u : size*2u;
     }
 
     if (actualSize > _current->size())
     {
-        ArrayList arrays;
-        getArrayList(arrays);
-        for (ArrayList::iterator i = arrays.begin(); i != arrays.end(); ++i)
-            i->get()->reserveArray(actualSize);
+        osg::Geometry::ArrayList arrays;
+        _geom->getArrayList(arrays);
+        for (auto& arr : arrays)
+            arr->reserveArray(actualSize);
     }
 }
 
@@ -1008,12 +1140,10 @@ LineDrawable::clear()
     unsigned n = getNumVerts();
     if (n > 0u)
     {
-        ArrayList arrays;
-        getArrayList(arrays);
-        for (ArrayList::iterator i = arrays.begin(); i != arrays.end(); ++i)
-        {
-            i->get()->resizeArray(0);
-        }
+        osg::Geometry::ArrayList arrays;
+        _geom->getArrayList(arrays);
+        for (auto& arr : arrays)
+            arr->resizeArray(0);
         reserve(n);
     }
 }
@@ -1034,6 +1164,13 @@ namespace
 }
 
 void
+LineDrawable::drawImplementation(osg::RenderInfo& ri) const
+{
+    OE_GL_ZONE;
+    _geom->draw(ri);
+}
+
+void
 LineDrawable::dirty()
 {
     initialize();
@@ -1042,19 +1179,19 @@ LineDrawable::dirty()
 
     _current->dirty();
 
-    if (_gpu)
+    if (_useGPU)
     {
         _previous->dirty();
         _next->dirty();
     }
 
     // rebuild primitive sets.
-    if (getNumPrimitiveSets() > 0)
+    if (_geom->getNumPrimitiveSets() > 0)
     {
-        removePrimitiveSet(0, 1);
+        _geom->removePrimitiveSet(0, 1);
     }
 
-    if (_gpu && _current->size() >= 4)
+    if (_useGPU && _current->size() >= 4)
     {
         // IMPORTANT!
         // Don't change the order of the elements! Because of the way
@@ -1066,7 +1203,7 @@ LineDrawable::dirty()
         if (_mode == GL_LINE_STRIP)
         {
             unsigned numEls = (getNumVerts()-1)*6;
-            osg::DrawElements* els = makeDE(numEls);  
+            osg::DrawElements* els = makeDE(numEls);
 
             for (int e = 2; e < _current->size() - 2; e += 4)
             {
@@ -1077,14 +1214,14 @@ LineDrawable::dirty()
                 els->addElement(e+3);
                 els->addElement(e+0); // PV
             }
-            
-            addPrimitiveSet(els);
+
+            _geom->addPrimitiveSet(els);
         }
 
         else if (_mode == GL_LINE_LOOP)
         {
             unsigned numEls = getNumVerts()*6;
-            osg::DrawElements* els = makeDE(numEls); 
+            osg::DrawElements* els = makeDE(numEls);
 
             int e;
             for (e = 2; e < _current->size() - 2; e += 4)
@@ -1103,54 +1240,76 @@ LineDrawable::dirty()
             els->addElement(0);
             els->addElement(1);
             els->addElement(e+0); // PV
-            
-            addPrimitiveSet(els);
+
+            _geom->addPrimitiveSet(els);
         }
 
         else if (_mode == GL_LINES)
         {
-            unsigned numEls = (getNumVerts()/2)*6;
-            osg::DrawElements* els = makeDE(numEls);  
+            // if there are an odd number of verts, ignore the last one.
+            unsigned numVerts = getNumVerts();
+            if (numVerts & 0x01) --numVerts;
 
-            for (int e = 0; e < _current->size(); e += 4)
+            if (numVerts > 0u)
             {
-                els->addElement(e+3);
-                els->addElement(e+1);
-                els->addElement(e+0); // PV
-                els->addElement(e+2);
-                els->addElement(e+3);
-                els->addElement(e+0); // PV
-            }
+                unsigned numEls = (numVerts/2)*6;
+                osg::DrawElements* els = makeDE(numEls);
 
-            addPrimitiveSet(els);
+                for(unsigned e=0; e<numVerts*2u; e += 4)
+                {
+                //for (int e = 0; e < _current->size(); e += 4)
+                    els->addElement(e+3);
+                    els->addElement(e+1);
+                    els->addElement(e+0); // PV
+                    els->addElement(e+2);
+                    els->addElement(e+3);
+                    els->addElement(e+0); // PV
+                }
+
+                _geom->addPrimitiveSet(els);
+            }
         }
     }
 
     else
     {
-        ArrayList arrays;
-        getArrayList(arrays);
-        for (unsigned i = 0; i<arrays.size(); ++i)
-            arrays[i]->dirty();
+        osg::Geometry::ArrayList arrays;
+        _geom->getArrayList(arrays);
+        for (auto& arr : arrays)
+            arr->dirty();
 
-        addPrimitiveSet(new osg::DrawArrays(_mode, _first, _count > 0u? _count : _current->size()));
+        _geom->addPrimitiveSet(new osg::DrawArrays(_mode, _first, _count > 0u? _count : _current->size()));
     }
 }
 
-osg::observer_ptr<osg::StateSet> LineDrawable::s_gpuStateSet;
+//osg::observer_ptr<osg::StateSet> LineDrawable::s_gpuStateSet;
 
 void
 LineDrawable::setupShaders()
 {
     // Create the singleton state set for the line shader. This stateset will be
     // shared by all LineDrawable instances so OSG will sort them together.
-    if (_gpu && !_gpuStateSet.valid())
+    if (_useGPU && !_gpuStateSet.valid())
     {
+        _gpuStateSet = Registry::instance()->getOrCreate<osg::StateSet>("oe.LineDrawable_StateSet", []()
+            {
+                auto ss = new osg::StateSet();
+                VirtualProgram* vp = VirtualProgram::getOrCreate(ss);
+                vp->setName("osgEarth::LineDrawable");
+                Shaders shaders;
+                shaders.load(vp, shaders.LineDrawable);
+                vp->addBindAttribLocation("oe_LineDrawable_prev", LineDrawable::PreviousVertexAttrLocation);
+                vp->addBindAttribLocation("oe_LineDrawable_next", LineDrawable::NextVertexAttrLocation);
+                ss->getOrCreateUniform("oe_LineDrawable_limits", osg::Uniform::FLOAT_VEC2)->set(osg::Vec2f(-1, -1));
+                ss->setMode(GL_CULL_FACE, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
+                return ss;
+            });
+#if 0
         if (s_gpuStateSet.lock(_gpuStateSet) == false)
         {
             // serialize access and double-check:
-            static Threading::Mutex s_mutex;
-            Threading::ScopedMutexLock lock(s_mutex);
+            static std::mutex s_mutex;
+            std::lock_guard<std::mutex> lock(s_mutex);
 
             if (s_gpuStateSet.lock(_gpuStateSet) == false)
             {
@@ -1166,44 +1325,113 @@ LineDrawable::setupShaders()
                 s_gpuStateSet->setMode(GL_CULL_FACE, osg::StateAttribute::OFF | osg::StateAttribute::OVERRIDE | osg::StateAttribute::PROTECTED);
             }
         }
+#endif
     }
+}
+
+void
+LineDrawable::traverse(osg::NodeVisitor& nv)
+{
+    _geom->accept(nv);
 }
 
 void
 LineDrawable::accept(osg::NodeVisitor& nv)
 {
     if (nv.validNodeMask(*this))
-    { 
+    {
         // Only push the shader if necessary.
-        // The reason for this approach is go we can inject the singleton 
-        // LineDrawable shader yet still allow the user to customize 
+        // The reason for this approach is go we can inject the singleton
+        // LineDrawable shader yet still allow the user to customize
         // the node's StateSet.
         bool shade =
-            _gpu &&
+            _useGPU &&
             nv.getVisitorType() == nv.CULL_VISITOR &&
             _gpuStateSet.valid();
 
+        if (!_current)
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            if (!_current)
+                initialize();
+        }
+
+        // Since we are hiding the Geometry below this "phantom" drawable,
+        // we must duplicate what OSG would normally do with the various
+        // visitors here so that statesets and callbacks all continue to 
+        // work as usual.
+
         osgUtil::CullVisitor* cv = shade? Culling::asCullVisitor(nv) : 0L;
+        auto stateset = getStateSet();
 
         nv.pushOntoNodePath(this);
 
-        if (cv)
+        if (cv) // CULL_VISITOR
+        {
+            // push the global GPU shader stateset
             cv->pushStateSet(_gpuStateSet.get());
 
-        nv.apply(*this); 
+            // and push this drawable's local stateset
+            if (stateset) cv->pushStateSet(stateset);
 
-        if (cv)
+            // handle cull callbacks
+            if (getCullCallback())
+                getCullCallback()->run(this, &nv);
+            else
+                traverse(nv);
+
+            // pop them both
+            if (stateset) cv->popStateSet();
             cv->popStateSet();
+        }
+
+        else if (nv.getVisitorType() == nv.UPDATE_VISITOR)
+        {
+            if (stateset && stateset->requiresUpdateTraversal())
+            {
+                stateset->runUpdateCallbacks(&nv);
+            }
+
+            // simulate the behavior in UpdateVisitor::apply
+            auto callback = getUpdateCallback();
+            if (callback)
+            {
+                callback->run(this, &nv);
+            }
+            else if (getNumChildrenRequiringUpdateTraversal() > 0)
+            {
+                traverse(nv);
+            }
+        }
+
+        else
+        {
+            // other visitor types (intersect, compute bound, etc)
+            // call apply here to invoke the default usual Node::accept() behavior.
+            nv.apply(*this);
+        }
 
         nv.popFromNodePath();
     }
+}
+
+void
+LineDrawable::setVertexAttribArray(unsigned i, osg::Array* arr)
+{
+    OE_SOFT_ASSERT_AND_RETURN(arr != nullptr, void());
+    OE_SOFT_ASSERT(arr->getNumElements() == 0);
+    OE_HARD_ASSERT(_geom.valid());
+
+    _geom->setVertexAttribArray(i, arr);
 }
 
 
 void
 LineDrawable::resizeGLObjectBuffers(unsigned maxSize)
 {
-    osg::Geometry::resizeGLObjectBuffers(maxSize);
+    osg::Drawable::resizeGLObjectBuffers(maxSize);
+    if (_geom.valid())
+        _geom->resizeGLObjectBuffers(maxSize);
     if (_gpuStateSet.valid())
         _gpuStateSet->resizeGLObjectBuffers(maxSize);
 }
@@ -1211,7 +1439,9 @@ LineDrawable::resizeGLObjectBuffers(unsigned maxSize)
 void
 LineDrawable::releaseGLObjects(osg::State* state) const
 {
-    osg::Geometry::releaseGLObjects(state);
+    osg::Drawable::releaseGLObjects(state);
+    if (_geom.valid())
+        _geom->releaseGLObjects(state);
     if (_gpuStateSet.valid())
         _gpuStateSet->releaseGLObjects(state);
 }

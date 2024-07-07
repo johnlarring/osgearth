@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -30,7 +30,7 @@ KML_Polygon::parseStyle(xml_node<>* node, KMLContext& cx, Style& style)
     // need at minimum a poly symbol.
     if ( !style.has<PolygonSymbol>() )
     {
-        style.getOrCreate<PolygonSymbol>()->fill()->color() = osg::Vec4f(1,1,1,1);
+        style.getOrCreate<PolygonSymbol>()->fill().mutable_value().color() = osg::Vec4f(1,1,1,1);
     }
 }
 

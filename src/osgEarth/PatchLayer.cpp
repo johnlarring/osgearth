@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -20,22 +20,25 @@
 
 using namespace osgEarth;
 
-PatchLayer::PatchLayer() :
-VisibleLayer()
+//............................................................................
+
+Config
+PatchLayer::Options::getConfig() const
 {
-    init();
+    return VisibleLayer::Options::getConfig();
 }
 
-PatchLayer::PatchLayer(PatchLayerOptions* optionsPtr) :
-VisibleLayer(optionsPtr ? optionsPtr : &_optionsConcrete),
-_options(optionsPtr ? optionsPtr : &_optionsConcrete)
+void
+PatchLayer::Options::fromConfig(const Config& conf)
 {
-    //nop - subclass will call init()
+    //NOP
 }
+
+//............................................................................
 
 void
 PatchLayer::init()
 {
-    Layer::init();    
+    VisibleLayer::init();    
     setRenderType(RENDERTYPE_TERRAIN_PATCH);
 }

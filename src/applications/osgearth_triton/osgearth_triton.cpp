@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2014 Pelican Mapping
 * http://osgearth.org
 *
@@ -18,14 +18,19 @@
 */
 #include <osgViewer/Viewer>
 #include <osgDB/FileNameUtils>
+#include <osgDB/ReadFile>
 #include <osgEarth/NodeUtils>
-#include <osgEarthUtil/EarthManipulator>
-#include <osgEarthUtil/ExampleResources>
-#include <osgEarthUtil/Controls>
+#include <osgEarth/LineDrawable>
+#include <osgEarth/Registry>
+#include <osgEarth/EarthManipulator>
+#include <osgEarth/ExampleResources>
+#include <osgEarth/Controls>
 #include <osgEarthTriton/TritonAPIWrapper>
 #include <osgEarthTriton/TritonCallback>
-#include <osgEarthTriton/TritonOptions>
 #include <osgEarthTriton/TritonLayer>
+#include <osgEarth/AnnotationLayer>
+#include <osgEarth/PlaceNode>
+#include <osgEarth/GeoPositionNode>
 
 #define LC "[osgearth_triton] "
 
@@ -33,7 +38,6 @@ using namespace osgEarth;
 using namespace osgEarth::Util;
 using namespace osgEarth::Triton;
 namespace ui = osgEarth::Util::Controls;
-
 
 struct Settings
 {
@@ -72,7 +76,7 @@ public:
 
     void onInitialize(Environment& env, Ocean& ocean)
     {
-        //todo
+        //nop
     }
 
     void onDrawOcean(Environment& env, Ocean& ocean)
@@ -90,30 +94,39 @@ struct App
     {
         tritonLayer = NULL;
         map = NULL;
+        const double lon = -118.5406, lat = 32.7838;
+
+        anchor.set(
+            SpatialReference::get("wgs84"), lon, lat, 0.0,
+            ALTMODE_ABSOLUTE);
+
+        isect = new Triton::TritonIntersections();
     }
 
     Map*         map;
     TritonLayer* tritonLayer;
     Settings     settings;
+    osg::ref_ptr<Triton::TritonIntersections> isect;
+    AnnotationLayer* labels;
+    AnnotationLayer* normals;
+    LineDrawable* normalDrawable;
+    GeoPoint anchor;
 
     void addTriton()
     {
-        // Create TritonNode from TritonOptions
-        osgEarth::Triton::TritonOptions tritonOptions;
-        tritonOptions.user()        = "my_user_name";
-        tritonOptions.licenseCode() = "my_license_code";
-        tritonOptions.maxAltitude() = 100000;
-        tritonOptions.useHeightMap() = true;
+        tritonLayer = new TritonLayer();
+        tritonLayer->setUserName("my_user_name");
+        tritonLayer->setLicenseCode("my_license_code");
+        tritonLayer->setMaxAltitude(100000);
+        tritonLayer->setUseHeightMap(true);
 
         const char* ev_t = ::getenv("TRITON_PATH");
         if ( ev_t )
         {
-            tritonOptions.resourcePath() = osgDB::concatPaths(
-                std::string(ev_t),
-                "Resources" );
+            tritonLayer->setResourcePath(osgDB::concatPaths(std::string(ev_t), "Resources"));
 
             OE_INFO << LC 
-                << "Setting resource path to << " << tritonOptions.resourcePath().get()
+                << "Setting resource path to << " << tritonLayer->getResourcePath()
                 << std::endl;
         }
         else
@@ -124,10 +137,11 @@ struct App
                 << std::endl;
         }
 
-
-        tritonLayer = new TritonLayer(tritonOptions, new TritonCallback(settings));
+        tritonLayer->setUserCallback(new TritonCallback(settings));
         map->addLayer(tritonLayer);
         settings.tritonLayer = tritonLayer;
+
+        tritonLayer->addIntersections(isect.get());
     }
 
     void removeTriton()
@@ -135,6 +149,76 @@ struct App
         if (tritonLayer)
             map->removeLayer(tritonLayer);
         tritonLayer = 0L;
+    }
+
+    void addBuoyancyTest(osg::Node* model)
+    {
+        //labels = new AnnotationLayer();
+        //map->addLayer(labels);
+
+        normals = new AnnotationLayer();
+        map->addLayer(normals);
+
+        // geometry for a unit normal vector
+        normalDrawable = new LineDrawable(GL_LINES);
+        normalDrawable->setColor(osg::Vec4(1,1,0,1));
+        normalDrawable->pushVertex(osg::Vec3(0,0,0));
+        normalDrawable->pushVertex(osg::Vec3(0,0,10));
+        normalDrawable->pushVertex(osg::Vec3(-2,0,0.5));
+        normalDrawable->pushVertex(osg::Vec3(2,0,0.5));
+        normalDrawable->pushVertex(osg::Vec3(0,-2,0.5));
+        normalDrawable->pushVertex(osg::Vec3(0,2,0.5));
+        normalDrawable->finish();
+
+        // a single shared anchor point for the intersection set:
+        isect->setAnchor(anchor);
+
+        // generate a bunch of local points around the anchor:
+        for(int x=-50; x<=50; x+=25)
+        {
+            for(int y=-50; y<=50; y+=25)
+            {
+                isect->addLocalPoint(osg::Vec3d(x, y, 0));
+
+                // a label communicating the wave height:
+                //PlaceNode* label = new PlaceNode();
+                //label->setDynamic(true);
+                //label->setPosition(anchor);
+                //label->setIconImage(image);
+                //label->setText("-");
+                //labels->getGroup()->addChild(label);
+
+                // a normal vector and optional model:
+                GeoPositionNode* normal = new GeoPositionNode();
+                normal->setDynamic(true);
+                normal->getPositionAttitudeTransform()->addChild(normalDrawable);
+                if (model)
+                    normal->getPositionAttitudeTransform()->addChild(model);
+                normal->setPosition(anchor);
+                normals->getGroup()->addChild(normal);
+            }
+        }
+
+        //ScreenSpaceLayout::setDeclutteringEnabled(false);
+    }
+
+    void updateBuoyancyTest()
+    {
+        for(unsigned i=0; i<isect->getHeights().size(); ++i)
+        {
+            osg::Vec3d local = isect->getInput()[i];
+            local.z() = isect->getHeights()[i];
+
+            //PlaceNode* label = dynamic_cast<PlaceNode*>(labels->getGroup()->getChild(i));
+            //label->getPositionAttitudeTransform()->setPosition(local);
+            //label->setText(Stringify()<<std::setprecision(2)<<local.z());
+
+            GeoPositionNode* normalNode = dynamic_cast<GeoPositionNode*>(normals->getGroup()->getChild(i));
+            normalNode->getPositionAttitudeTransform()->setPosition(local);
+            osg::Quat q;
+            q.makeRotate(osg::Vec3d(0,0,1), isect->getNormals()[i]);
+            normalNode->getPositionAttitudeTransform()->setAttitude(q);
+        }
     }
 };
 
@@ -159,23 +243,23 @@ struct Toggle : public ui::ControlEventHandler
     }
 };
 
-Container* createUI()
+ui::Container* createUI()
 {
-    VBox* box = new VBox();
+    ui::VBox* box = new ui::VBox();
     box->setBackColor(0,0,0,0.5);
-    Grid* grid = box->addControl(new Grid());
+    ui::Grid* grid = box->addControl(new ui::Grid());
     int r=0;
-    grid->setControl(0, r, new LabelControl("Chop"));
-    grid->setControl(1, r, new HSliderControl(0, 3, 0, new Set<double>(s_app.settings.chop)));
+    grid->setControl(0, r, new ui::LabelControl("Chop"));
+    grid->setControl(1, r, new ui::HSliderControl(0, 3, 0, new Set<double>(s_app.settings.chop)));
     ++r;
-    grid->setControl(0, r, new LabelControl("Sea State"));
-    grid->setControl(1, r, new HSliderControl(0, 12, 5, new Set<double>(s_app.settings.seaState)));
+    grid->setControl(0, r, new ui::LabelControl("Sea State"));
+    grid->setControl(1, r, new ui::HSliderControl(0, 12, 5, new Set<double>(s_app.settings.seaState)));
     ++r;  
-    grid->setControl(0, r, new LabelControl("Alpha"));
-    grid->setControl(1, r, new HSliderControl(0, 1.0, 1.0, new Set<float>(s_app.settings.alpha)));
+    grid->setControl(0, r, new ui::LabelControl("Alpha"));
+    grid->setControl(1, r, new ui::HSliderControl(0, 1.0, 1.0, new Set<float>(s_app.settings.alpha)));
     ++r;
-    grid->setControl(0, r, new LabelControl("Toggle"));
-    grid->setControl(1, r, new CheckBoxControl(false, new Toggle()));
+    grid->setControl(0, r, new ui::LabelControl("Toggle"));
+    grid->setControl(1, r, new ui::CheckBoxControl(true, new Toggle()));
 
     grid->getControl(1, r-1)->setHorizFill(true,200);
 
@@ -202,29 +286,52 @@ main(int argc, char** argv)
     if ( arguments.read("--help") )
         return usage(argv[0]);
 
+    osg::Node* model = 0L;
+    std::string filename;
+    if (arguments.read("--model", filename))
+    {
+        model = osgDB::readRefNodeFile(filename).release();
+        Registry::shaderGenerator().run(model);
+    }
+
     // create a viewer:
     osgViewer::Viewer viewer(arguments);
 
-    // Tell the database pager to not modify the unref settings
-    viewer.getDatabasePager()->setUnrefImageDataAfterApplyPolicy( false, false );
-
     // install our default manipulator (do this before calling load)
-    viewer.setCameraManipulator( new osgEarth::Util::EarthManipulator() );
+    EarthManipulator* manip = new EarthManipulator();
+    viewer.setCameraManipulator(manip);
 
     // load an earth file, and support all or our example command-line options
     // and earth file <external> tags    
-    osg::Group* node = osgEarth::Util::MapNodeHelper().load(arguments, &viewer, createUI());
-    if ( node )
-    {        
-        viewer.getCamera()->setNearFarRatio(0.00002);
-        viewer.getCamera()->setSmallFeatureCullingPixelSize(-1.0f);
+    auto node = osgEarth::Util::MapNodeHelper().load(arguments, &viewer);
+    if (node.valid() && MapNode::get(node))
+    {
+        auto group = new osg::Group();
+        auto canvas = new ui::ControlCanvas();
+        canvas->addChild(createUI());
 
-        viewer.setSceneData( node );
+        group->addChild(node);
+        group->addChild(canvas);
+        viewer.setSceneData(group);
 
         s_app.map = MapNode::get( node )->getMap();
-        s_app.addTriton();
 
-        return viewer.run();
+        s_app.addTriton();
+        s_app.addBuoyancyTest(model);
+        
+        // Zoom the camera to our area of interest:
+        Viewpoint vp;
+        vp.heading() = Angle(25, Units::DEGREES);
+        vp.pitch() = Angle(-25, Units::DEGREES);
+        vp.range() = Distance(400, Units::METERS);
+        vp.focalPoint() = s_app.anchor;
+        manip->setViewpoint(vp);
+
+        while(!viewer.done())
+        {
+            viewer.frame();
+            s_app.updateBuoyancyTest();
+        }
     }
     else
     {

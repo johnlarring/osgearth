@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -34,7 +34,7 @@ using namespace rapidxml;
 namespace osgEarth_kml
 {
     using namespace osgEarth;
-    using namespace osgEarth::Drivers;
+    using namespace osgEarth::KML;
 
     class KMLReader
     {
@@ -52,8 +52,8 @@ namespace osgEarth_kml
         osg::Node* read( xml_document<>& doc, const osgDB::Options* dbOptions );
 
     private:
-        MapNode*          _mapNode;
-        const KMLOptions* _options;
+        MapNode* _mapNode = nullptr;
+        const KMLOptions* _options = nullptr;
     };
 
 } // namespace osgEarth_kml

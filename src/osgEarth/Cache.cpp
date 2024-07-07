@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -18,7 +18,9 @@
  */
 #include <osgEarth/Cache>
 #include <osgEarth/Registry>
+#include <osgEarth/Utils>
 #include "sha1.hpp"
+#include <osgEarth/Notify>
 
 #include <osgDB/ReadFile>
 
@@ -31,6 +33,21 @@ using namespace osgEarth::Threading;
 
 CacheOptions::~CacheOptions()
 {
+}
+
+Config
+CacheOptions::getConfig() const
+{
+    Config conf = ConfigOptions::getConfig();
+    conf.set("enable_node_caching", enableNodeCaching());
+    return conf;
+}
+
+void
+CacheOptions::fromConfig(const Config& conf)
+{
+    enableNodeCaching().setDefault(false);
+    conf.get("enable_node_caching", enableNodeCaching());
 }
 
 //------------------------------------------------------------------------
@@ -62,10 +79,18 @@ CacheSettings::integrateCachePolicy(const optional<CachePolicy>& policy)
 {
     // integrate the fields that are passed in first:
     if ( policy.isSet() )
-        cachePolicy()->mergeAndOverride( policy );
+        cachePolicy().mutable_value().mergeAndOverride( policy );
 
     // then resolve with global overrides from the registry.
     Registry::instance()->resolveCachePolicy( cachePolicy() );
+}
+
+void
+CacheSettings::integrateCachePolicy(const CachePolicy& policy)
+{
+    optional<CachePolicy> temp;
+    temp = policy;
+    integrateCachePolicy(temp);
 }
 
 void
@@ -73,42 +98,39 @@ CacheSettings::store(osgDB::Options* readOptions)
 {
     if (readOptions)
     {
-        osg::UserDataContainer* udc = readOptions->getOrCreateUserDataContainer();
-        unsigned index = udc->getUserObjectIndex(CACHESETTINGS_UDC_NAME);
-        udc->removeUserObject(index);
-        udc->addUserObject(this);
+        ObjectStorage::set(readOptions, this);
     }
 }
  
 CacheSettings*
 CacheSettings::get(const osgDB::Options* readOptions)
 {
-    CacheSettings* obj = 0L;
-    if (readOptions)
-    {
-        const osg::UserDataContainer* udc = readOptions->getUserDataContainer();
-        if (udc) {
-            osg::Object* temp = const_cast<osg::Object*>(udc->getUserObject(CACHESETTINGS_UDC_NAME));
-            obj = dynamic_cast<CacheSettings*>(temp);
-        }
-    }
-    return obj;
+    osg::ref_ptr<CacheSettings> settings;
+    ObjectStorage::get(readOptions, settings);
+    return settings.get();
 }
 
 std::string
 CacheSettings::toString() const
 {
-    return Stringify()
-        << "cache=" << (_cache.valid() ? _cache->className() : "none")
-        << "; policy=" << _policy->usageString()
-        << "; bin=" << (_activeBin.get() ? "yes" : "no");
+    if (_cache.valid() && _policy->isCacheEnabled())
+    {
+        return Stringify()
+            << "[cache=" << (_cache.valid() ? _cache->className() : "none")
+            << "; policy=" << _policy->usageString()
+            << "; bin=" << (_activeBin.get() ? "yes" : "no")
+            << "]";
+    }
+    else
+    {
+        return "[no cache]";
+    }
 }
 
 //------------------------------------------------------------------------
 
-Cache::Cache( const CacheOptions& options ) :
-_ok     ( true ),
-_options( options )
+Cache::Cache(const CacheOptions& options) :
+    _options(options)
 {
     //nop
 }
@@ -117,10 +139,10 @@ Cache::~Cache()
 {
 }
 
-Cache::Cache( const Cache& rhs, const osg::CopyOp& op ) :
-osg::Object( rhs, op )
+Cache::Cache(const Cache& rhs, const osg::CopyOp& op) :
+    osg::Object(rhs, op)
 {
-    _ok = rhs._ok;
+    _status = rhs._status;
 }
 
 CacheBin*
@@ -134,7 +156,7 @@ Cache::getBin( const std::string& binID )
 void
 Cache::removeBin( CacheBin* bin )
 {
-    _bins.remove( bin );
+    _bins.remove( bin->getID() );
 }
 
 namespace
@@ -190,10 +212,14 @@ CacheFactory::create( const CacheOptions& options )
         osg::ref_ptr<osgDB::Options> rwopt = Registry::cloneOrCreateOptions();
         rwopt->setPluginData( CACHE_OPTIONS_TAG, (void*)&options );
 
-        std::string driverExt = std::string(".osgearth_cache_") + options.getDriver();
-        osg::ref_ptr<osg::Object> object = osgDB::readRefObjectFile( driverExt, rwopt.get() );
-        result = dynamic_cast<Cache*>( object.release() );
-        if ( !result.valid() )
+        std::string driverExt = std::string("osgearth_cache_") + options.getDriver();
+        auto rw = osgDB::Registry::instance()->getReaderWriterForExtension(driverExt);
+        if (rw)
+        {
+            osg::ref_ptr<osg::Object> object = rw->readObject("." + driverExt, rwopt.get()).getObject();
+            result = dynamic_cast<Cache*>(object.release());
+        }
+        if (!result.valid())
         {
             OE_WARN << LC << "Failed to load cache plugin for type \"" << options.getDriver() << "\"" << std::endl;
         }

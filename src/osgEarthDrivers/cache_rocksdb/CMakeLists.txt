@@ -1,36 +1,26 @@
-IF(ROCKSDB_FOUND OR RocksDB_FOUND)
+find_package(RocksDB QUIET)
 
-SET(CMAKE_CXX_STANDARD 11)
+if(RocksDB_FOUND)
 
-INCLUDE_DIRECTORIES( ${ROCKSDB_INCLUDE_DIR} )
+    message(STATUS "Found rocksdb")
 
-SET(TARGET_H
-    RocksDBCacheOptions
-    RocksDBCache
-    RocksDBCacheBin
-    Tracker
-)
-SET(TARGET_SRC 
-    RocksDBCache.cpp
-    RocksDBCacheBin.cpp
-    RocksDBCacheDriver.cpp
-)
-
-SET(TARGET_LIBRARIES_VARS ROCKSDB_LIBRARY ZLIB_LIBRARY)
-
-IF(MSVC)
-    SET(TARGET_EXTERNAL_LIBRARIES ws2_32 winmm rpcrt4 shlwapi)
-ENDIF(MSVC)
-
-IF(MINGW)
-    SET(TARGET_EXTERNAL_LIBRARIES RocksDB::rocksdb)
-ENDIF(MINGW)
-
-SETUP_PLUGIN(osgearth_cache_rocksdb)
-
-# to install public driver includes:
-SET(LIB_NAME cache_rocksdb)
-SET(LIB_PUBLIC_HEADERS RocksDBCacheOptions)
-INCLUDE(ModuleInstallOsgEarthDriverIncludes OPTIONAL)
-
-ENDIF(ROCKSDB_FOUND OR RocksDB_FOUND)
+    set(CMAKE_CXX_STANDARD 17)
+    
+    add_osgearth_plugin(
+        TARGET 
+            osgdb_osgearth_cache_rocksdb
+        PUBLIC_HEADERS
+            RocksDBCacheOptions
+        HEADERS
+            RocksDBCache
+            RocksDBCacheBin
+            Tracker
+        SOURCES 
+            RocksDBCache.cpp
+            RocksDBCacheBin.cpp
+            RocksDBCacheDriver.cpp )
+            
+    target_link_libraries(osgdb_osgearth_cache_rocksdb
+        PRIVATE RocksDB::rocksdb RocksDB::rocksdb-shared)    
+        
+endif()

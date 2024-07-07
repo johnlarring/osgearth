@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -25,11 +25,11 @@
 #include <osgEarth/Common>
 #include <osgEarth/Containers>
 #include <osgEarth/DrapeableNode>
-#include <osgEarth/ThreadingUtils>
 #include <osg/Camera>
 #include <osg/ObserverNodePath>
+#include <queue>
 
-namespace osgEarth
+namespace osgEarth { namespace Util
 {
     /**
      * Culling set for tracking groups whose contents should be "draped",
@@ -41,7 +41,7 @@ namespace osgEarth
     public:
         struct Entry
         {            
-            osg::ref_ptr<osg::Group>     _node;
+            osg::observer_ptr<DrapeableNode> _node;
             osg::ref_ptr<osg::RefMatrix> _matrix;
             osg::ObserverNodePath        _path;
             int                          _frame;
@@ -57,16 +57,19 @@ namespace osgEarth
         /** Runs a node visitor on the cull set, optionally popping as it goes along. */
         void accept(osg::NodeVisitor& nv);
 
-        /** Bounds of this set */
-        const osg::BoundingSphere& getBound() const { return _bs; }
-
-        /** Number of elements in the set */
-        unsigned size() const { return _entries.size(); }
+        //! Bounds of the latest set
+        const osg::BoundingSphere& getBound() const;
 
     private:
-        std::vector<Entry>  _entries;
-        osg::BoundingSphere _bs;
-        bool                _frameCulled;
+        struct FrameData {
+            FrameData() : _acceptFrame(-1) { }
+            int _acceptFrame;
+            std::vector<Entry> _entries;
+            osg::BoundingSphere _bs;
+        };
+        using SortedFrameData = std::map<int, FrameData>;
+        SortedFrameData _data;
+        std::mutex _data_mutex;
     };
 
     /**
@@ -76,13 +79,20 @@ namespace osgEarth
     class OSGEARTH_INTERNAL DrapingManager
     {
     public:
+        DrapingManager();
+
         //! Gets the draping cull set associated with a camera.
         DrapingCullSet& get(const osg::Camera*);
 
+        //! Sets the render bin number for DrapingCameras.
+        void setRenderBinNumber(int value) { _renderBinNum = value; }
+        int getRenderBinNumber() const { return _renderBinNum; }
+
     private:
         PerObjectFastMap<const osg::Camera*, DrapingCullSet> _sets;
+        int _renderBinNum;
     };
 
-} // namespace osgEarth
+} } // namespace osgEarth
 
 #endif // OSGEARTH_DRAPING_CULL_SET

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -16,10 +16,12 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
-#include <osgEarth/GLSLChunker>
-#include <osgEarth/StringUtils>
+#include "GLSLChunker"
+#include "StringUtils"
+#include <osgEarth/Notify>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 
 void
@@ -143,18 +145,26 @@ GLSLChunker::read(const std::string& input, Chunks& output) const
                     --parenLevel;
                 }
 
-                else if (c0 == '{') {
+                else if (c0 == '{')
+                {
                     ++braceLevel;
                     // if we were in a statement, the precense of an open-brace converts it to a FUNCTION
-                    // unless we can detect that it's a struct.
-                    if (type == Chunk::TYPE_STATEMENT) {
-                        if (tokens.empty() || (tokens[0] != "struct" && tokens[0].substr(0,6) != "layout")) {
+                    // unless we can detect that it's a struct or an interface block.
+                    if (type == Chunk::TYPE_STATEMENT)
+                    {
+                        if (tokens.empty() || 
+                            (tokens[0] != "struct"  && 
+                             tokens[0] != "in"      &&
+                             tokens[0] != "out"     &&
+                             tokens[0].substr(0,6) != "layout"))
+                        {
                             type = Chunk::TYPE_FUNCTION;
                         }
                     }
                 }
 
-                else if (c0 == '}') {
+                else if (c0 == '}')
+                {
                     --braceLevel;
                 }
             }
@@ -194,14 +204,52 @@ GLSLChunker::read(const std::string& input, Chunks& output) const
     }
 }
 
+namespace
+{
+    std::string indent(const std::string& input)
+    {
+        std::ostringstream out;
+        std::vector<std::string> lines;
+        StringTokenizer(input, lines, "\n", "", true);
+        std::string prefix;
+        for (auto& line : lines)
+        {
+            auto temp = Strings::trim(line);
+            auto pos = temp.find_first_not_of(" \t", 0);
+            if (pos > 0 && pos != temp.npos)
+                temp = temp.substr(pos);
+
+            bool is_directive = (temp.size() > 0 && temp[0] == '#');
+
+            if (temp.find('}') != temp.npos && prefix.size() >= 4)
+                prefix.resize(prefix.size() - 4);
+
+            if (is_directive)
+                out << temp << "\n";
+            else
+                out << prefix << temp << "\n";
+            
+            if (temp.find('{') != temp.npos)
+                prefix += "    ";
+        }
+        return out.str();
+    }
+}
 
 void
-GLSLChunker::write(const Chunks& input, std::string& output) const
+GLSLChunker::write(const Chunks& input, std::string& output, bool reindent) const
 {
     std::stringstream buf;
     for(int i=0; i<input.size(); ++i)
     {
-        buf << input[i].text << "\n";
+        if (reindent && input[i].type != Chunk::TYPE_COMMENT && input[i].type != Chunk::TYPE_DIRECTIVE)
+        {
+            buf << indent(input[i].text);
+        }
+        else
+        {
+            buf << input[i].text << "\n";
+        }
     }
     output = buf.str();
 }
@@ -220,8 +268,9 @@ GLSLChunker::replace(Chunks& input, const std::string& pattern, const std::strin
     for(int i=0; i<input.size(); ++i)
     {
         Chunk& chunk = input[i];
-        osgEarth::replaceIn(chunk.text, pattern, replacement);
+        osgEarth::Util::replaceIn(chunk.text, pattern, replacement);
         for (unsigned t = 0; t<chunk.tokens.size(); ++t)
-            osgEarth::replaceIn(chunk.tokens[t], pattern, replacement);
+            osgEarth::Util::replaceIn(chunk.tokens[t], pattern, replacement);
     }
 }
+

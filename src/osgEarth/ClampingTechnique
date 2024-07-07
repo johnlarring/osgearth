@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -31,7 +31,10 @@
 namespace osgEarth
 {
     class TerrainEngineNode;
+}
 
+namespace osgEarth { namespace Util
+{
     /**
      * Clamps geometry to the terrain using the GPU.
      *
@@ -77,6 +80,10 @@ namespace osgEarth
 
     public: // OverlayTechnique
 
+        bool constrainOrthoZ() const override {
+            return true;
+        }
+
         bool hasData(
             OverlayDecorator::TechRTTParams& params) const;
 
@@ -108,12 +115,12 @@ namespace osgEarth
 
         mutable ClampingManager _clampingManager;
         ClampingManager& getClampingManager() { return _clampingManager; }
-        friend class MapNode;
+        friend class osgEarth::MapNode;
 
     private:
         void setUpCamera(OverlayDecorator::TechRTTParams& params);
     };
 
-} // namespace osgEarth
+} }
 
 #endif //OSGEARTH_OVERLAY_CLAMPING_TECHNIQUE

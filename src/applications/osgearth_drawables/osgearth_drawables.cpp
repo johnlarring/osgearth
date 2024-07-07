@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -38,6 +38,12 @@
 
 using namespace osgEarth;
 
+// rotates a 16-bit value to the right by the specified # of bits, where bits is [0,15]
+void ror(unsigned short& v, unsigned short bits)
+{
+    v = (v << (16-bits)) | (v >> bits);
+}
+
 void addVerts(LineDrawable* line, double x, double y)
 {
     line->pushVertex(osg::Vec3(x, 0, y));
@@ -48,6 +54,7 @@ void addVerts(LineDrawable* line, double x, double y)
     line->pushVertex(osg::Vec3(x + 5, 0, y + 10));
     line->pushVertex(osg::Vec3(x, 0, y + 10));
     line->pushVertex(osg::Vec3(x, 0, y + 5));
+    line->pushVertex(osg::Vec3(x + 5, 0, y + 5));
     line->finish();
 }
 
@@ -102,7 +109,8 @@ osg::Node* makeGeometryForImport(double x, double y)
     verts->push_back(osg::Vec3(x + 5, 0, y + 10));
     verts->push_back(osg::Vec3(x, 0, y + 10));
     verts->push_back(osg::Vec3(x, 0, y + 5));
-    geom->setVertexArray(verts);    
+    verts->push_back(osg::Vec3(x + 5, 0, y + 5));
+    geom->setVertexArray(verts);
     osg::Vec4Array* colors = new osg::Vec4Array(1);
     (*colors)[0].set(1,1,1,1);
     geom->setColorArray(colors);
@@ -112,20 +120,14 @@ osg::Node* makeGeometryForImport(double x, double y)
     return geom;
 }
 
-struct TestFirstCount : public osg::NodeCallback
+template<typename T>
+struct CB : public osg::NodeCallback
 {
-    void operator()(osg::Node* node, osg::NodeVisitor* nv)
-    {
-        if (nv->getFrameStamp()->getFrameNumber() % 20 == 0)
-        {
-            LineDrawable* line = (LineDrawable*)node;
-
-            unsigned total = line->getNumVerts();
-            unsigned first = line->getFirst();
-        
-            line->setFirst( (first+1) % total );
-            line->setCount( 3 );
-        }
+    using F = std::function<void(T*, osg::NodeVisitor*)>;
+    F _func;
+    CB(F func) : _func(func) { }
+    void operator()(osg::Node* node, osg::NodeVisitor* nv) {
+        _func(static_cast<T*>(node), nv);
     }
 };
 
@@ -135,7 +137,7 @@ osg::Node* createDrawables()
     // MapNode installs one automatically, but we're not using MapNode
     // in this example.
     osg::Group* group = new osg::Group();
-    group->addCullCallback(new InstallViewportSizeUniform());
+    group->addCullCallback(new InstallCameraUniform());
 
     float x = 10;
     float y = 10;
@@ -148,9 +150,22 @@ osg::Node* createDrawables()
 
     x += 20;
     LineDrawable* loop = new LineDrawable(GL_LINE_LOOP);
+    loop->setDataVariance(osg::Object::DYNAMIC);
     loop->setLineWidth(1);
     loop->setColor(osg::Vec4(1,1,0,1));
     addVerts(loop, x, y);
+    loop->addUpdateCallback(new CB<LineDrawable>(
+        [&](LineDrawable* line, osg::NodeVisitor* nv)
+        {
+            unsigned fn = nv->getFrameStamp()->getFrameNumber();
+            if (fn % 19 == 0)
+            {
+                int size = (fn%2 == 0) ? 10 : 12;
+                line->clear();
+                addVerts(line, size + 20, size);
+            }
+        }
+    ));
     group->addChild(loop);
 
     x += 20;
@@ -160,7 +175,50 @@ osg::Node* createDrawables()
     stippled->setColor(osg::Vec4(0,1,0,1));
     addVerts(stippled, x, y);
     group->addChild(stippled);
-    
+
+    x += 20;
+    LineDrawable* rollStipple = new LineDrawable(GL_LINE_STRIP);
+    rollStipple->setLineWidth(4);
+    rollStipple->setStipplePattern(0xfff0);
+    rollStipple->setColor(osg::Vec4(1,1,0,1));
+    addVerts(rollStipple, x, y);
+    rollStipple->addUpdateCallback(new CB<LineDrawable>(
+        [&](LineDrawable* line, osg::NodeVisitor* nv)
+        {
+            GLushort p = line->getStipplePattern();
+            ror(p, 1);
+            line->setStipplePattern(p);
+        }
+    ));
+    group->addChild(rollStipple);
+
+    x += 20;
+    LineDrawable* stippledNoQuantized = new LineDrawable(GL_LINE_STRIP);
+    stippledNoQuantized->setLineWidth(4);
+    stippledNoQuantized->setStipplePattern(0xff00);
+    stippledNoQuantized->setColor(osg::Vec4(1, 0.5, 0.5, 1));
+    stippledNoQuantized->setStippleQuantize(0.0f);
+    addVerts(stippledNoQuantized, x, y);
+    group->addChild(stippledNoQuantized);
+
+    x += 20;
+    LineDrawable* rollColor = new LineDrawable(GL_LINE_STRIP);
+    rollColor->setLineWidth(4);
+    rollColor->setColor(osg::Vec4(1, 1, 0, 1));
+    addVerts(rollColor, x, y);
+    rollColor->addUpdateCallback(new CB<LineDrawable>(
+        [&](LineDrawable* line, osg::NodeVisitor* nv)
+        {
+            unsigned fn = nv->getFrameStamp()->getFrameNumber();
+            if (fn % 13 == 0) {
+                int index = fn % line->getNumVerts();
+                line->setColor(osg::Vec4(1, 1, 0, 1));
+                line->setColor(index, osg::Vec4(1, 0, 0, 1));
+            }
+        }
+    ));
+    group->addChild(rollColor);
+
     x += 20;
     LineDrawable* segments = new LineDrawable(GL_LINES);
     segments->setLineWidth(3);
@@ -173,9 +231,20 @@ osg::Node* createDrawables()
     firstCount->setLineWidth(5);
     firstCount->setColor(osg::Vec4(1,0,1,1));
     addVerts(firstCount, x, y);
-    firstCount->addUpdateCallback(new TestFirstCount());
+    firstCount->addUpdateCallback(new CB<LineDrawable>(
+        [&](LineDrawable* line, osg::NodeVisitor* nv)
+        {
+            if (nv->getFrameStamp()->getFrameNumber() % 20 == 0)
+            {
+                unsigned total = line->getNumVerts();
+                unsigned first = line->getFirst();
+                line->setFirst((first + 1) % total);
+                line->setCount(3);
+            }
+        }
+    ));
     group->addChild(firstCount);
-    
+
     x += 20;
     osg::ref_ptr<osg::Node> node = makeGeometryForImport(x, y);
     LineGroup* lines = new LineGroup();
@@ -238,8 +307,11 @@ osg::Node* createDrawables()
 int
 main(int argc, char** argv)
 {
+    osgEarth::initialize();
+
     osg::ArgumentParser arguments(&argc,argv);
     osgViewer::Viewer viewer(arguments);
+    viewer.setRealizeOperation(new GL3RealizeOperation());
 
     osg::ref_ptr<osg::Node> node = createDrawables();
 
@@ -287,7 +359,7 @@ main(int argc, char** argv)
     GLUtils::setGlobalDefaults(viewer.getCamera()->getOrCreateStateSet());
 
     viewer.setSceneData(node.get());
-    
+
     viewer.addEventHandler(new osgViewer::StatsHandler());
     viewer.addEventHandler(new osgViewer::WindowSizeHandler());
     viewer.addEventHandler(new osgGA::StateSetManipulator(viewer.getCamera()->getOrCreateStateSet()));

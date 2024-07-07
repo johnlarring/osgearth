@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2014 Pelican Mapping
 * http://osgearth.org
 *
@@ -25,7 +25,6 @@
 #include "TileDrawable"
 #include "TileRenderModel"
 
-#include <osgEarth/MapInfo>
 #include <osgEarth/Horizon>
 #include <osg/MatrixTransform>
 #include <osg/BoundingBox>
@@ -35,7 +34,7 @@
 #include <osgUtil/CullVisitor>
 #include <vector>
 
-namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
+namespace osgEarth { namespace REX
 {
     using namespace osgEarth;
 
@@ -44,11 +43,16 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
      */
     struct HorizonTileCuller
     {
-        osg::Vec3d  _points[4];
+        // four points representing to upper face of the bounding box
+        osg::Vec3d _points[4];
+
+        // Horizon object to consider for culling
         osg::ref_ptr<Horizon> _horizon;
 
+        //! Reconfigure the culler
         void set(const SpatialReference* srs, const osg::Matrix& local2world, const osg::BoundingBox& bbox);
 
+        //! True if this tile may be visible relative to the horizon
         bool isVisible(const osg::Vec3d& from) const;
     };
 
@@ -61,19 +65,33 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
     {
     public:
         SurfaceNode(
-            const TileKey&        tilekey,
-            const MapInfo&        mapinfo,
-            const RenderBindings& bindings,
-            TileDrawable*         drawable);
+            const TileKey& tilekey,
+            TileDrawable* drawable);
 
+        //! Update the elevation raster associated with this tile
         void setElevationRaster(const osg::Image* raster, const osg::Matrixf& scaleBias);
-        const osg::Image* getElevationRaster() const;
-        const osg::Matrixf& getElevationMatrix() const;
 
-        const osg::BoundingBox& getAlignedBoundingBox() const;
+        //! Elevation raster representing this surface
+        const osg::Image* getElevationRaster() const { 
+            return _drawable->getElevationRaster();
+        }
+
+        //! Elevation matrix representing to this surface
+        const osg::Matrixf& getElevationMatrix() const { 
+            return _drawable->getElevationMatrix(); 
+        }
+
+        //! aligned BBOX for culling (derived from elevation raster)
+        const osg::BoundingBox& getAlignedBoundingBox() const {
+            return _drawable->getBoundingBox();
+        }
         
-        TileDrawable* getDrawable() const { return _drawable.get(); }
+        //! Proxy drawable
+        TileDrawable* getDrawable() const { 
+            return _drawable.get(); 
+        }
 
+        //! Horizon visibility check
         inline bool isVisibleFrom(const osg::Vec3& viewpoint) const {
             return _horizonCuller.isVisible(viewpoint);
         }
@@ -104,16 +122,24 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
 
         osg::BoundingSphere computeBound() const;
 
+        osg::Node* getDebugNode() const { return _debugNode.get(); }
+
+        void setLastFramePassedCull(unsigned fn);
+
+        unsigned getLastFramePassedCull() const { return _lastFramePassedCull; }
+
+        float getPixelSizeOnScreen(osg::CullStack* cull) const;
+
     protected:
         virtual ~SurfaceNode() { }
 
         TileKey                     _tileKey;
         osg::ref_ptr<TileDrawable>  _drawable;
-        osg::ref_ptr<osg::Group>    _debugGeode;
+        osg::ref_ptr<osg::Node>     _debugNode;
         osg::ref_ptr<osgText::Text> _debugText;
         static const bool           _enableDebugNodes;
-        
-        HorizonTileCuller           _horizonCuller;        
+        int                         _lastFramePassedCull;
+        HorizonTileCuller           _horizonCuller;
 
         typedef osg::Vec3 VectorPoints[8];
 
@@ -123,10 +149,10 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
 
         VectorPoints _worldCorners;
 
-        typedef VectorPoints (ChildrenCorners) [4];
+        using ChildrenCorners = VectorPoints[4];
         ChildrenCorners _childrenCorners;
     };
 
-} } } // namespace osgEarth::Drivers::RexTerrainEngine
+} } // namespace osgEarth::REX
 
 #endif // OSGEARTH_DRIVERS_REX_SURFACE_NODE

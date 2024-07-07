@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -22,6 +22,7 @@
 #include <osgEarth/StringUtils>
 #include <osgEarth/FileUtils>
 #include <osgEarth/URI>
+#include <osgEarth/GLUtils>
 #include <osgDB/FileUtils>
 #include <osgDB/FileNameUtils>
 #include <stdio.h>
@@ -90,12 +91,12 @@ namespace
         return
             k == "options" ||
             //k == "image" ||
-            k == "elevation" ||
-            k == "heightfield" ||
+            //k == "elevation" ||
+            //k == "heightfield" ||
             //k == "model" ||
             //k == "mask" ||
             k == "external" ||
-            k == "extensions" ||
+            //k == "extensions" ||
             k == "libraries";
     }
 
@@ -161,7 +162,7 @@ namespace
                 }
                 else
                 {
-                    OE_WARN << LC << "Failed to load library \"" << libName << "\"\n";
+                    OE_INFO << LC << "Failed to load library \"" << libName << "\"\n";
                 }
             }
         }        
@@ -189,6 +190,12 @@ namespace
             _rewriteAbsolutePaths = value;
         }
 
+        /** Returns true if key contains "_fragment", or is identical to "fragment" */
+        bool keyContainsFragment(const std::string& key, const std::string& fragment) const
+        {
+            return key == fragment || key.find("_" + fragment) != std::string::npos;
+        }
+
         bool isLocation(const Config& input) const
         {
             if ( input.value().empty() )
@@ -198,13 +205,13 @@ namespace
                 return false;
 
             return 
-                input.key() == "url"      ||
-                input.key() == "uri"      ||
-                input.key() == "href"     ||
-                input.key() == "filename" ||
-                input.key() == "file"     ||
-                input.key() == "pathname" ||
-                input.key() == "path";
+                keyContainsFragment(input.key(), "url")      ||
+                keyContainsFragment(input.key(), "uri")      ||
+                keyContainsFragment(input.key(), "href")     ||
+                keyContainsFragment(input.key(), "filename") ||
+                keyContainsFragment(input.key(), "file")     ||
+                keyContainsFragment(input.key(), "pathname") ||
+                keyContainsFragment(input.key(), "path");
         }
 
         void apply(Config& input)
@@ -217,7 +224,7 @@ namespace
                 std::string newValue = resolve(inputURI);
                 if ( newValue != input.value() )
                 {
-                    input.value() = newValue;
+                    input.setValue(newValue);
                     input.setReferrer( _newReferrerAbsPath );
                 }
 
@@ -268,48 +275,48 @@ namespace
             return inputURI.base();
         }
 
-		std::string getPathRelative(const std::string& from, const std::string& to)
-		{
-			// This implementation is not 100% robust, and should be replaced with C++0x "std::path" as soon as possible.
+        std::string getPathRelative(const std::string& from, const std::string& to)
+        {
+            // This implementation is not 100% robust, and should be replaced with C++0x "std::path" as soon as possible.
 
-			// Definition: an "element" is a part between slashes. Ex: "/a/b" has two elements ("a" and "b").
-			// Algorithm:
-			// 1. If paths are neither both absolute nor both relative, then we cannot do anything (we need to make them absolute, but need additional info on how to make it). Return.
-			// 2. If both paths are absolute and root isn't the same (for Windows only, as roots are of the type "C:", "D:"), then the operation is impossible. Return.
-			// 3. Iterate over two paths elements until elements are equal
-			// 4. For each remaining element in "from", add ".." to result
-			// 5. For each remaining element in "to", add this element to result
+            // Definition: an "element" is a part between slashes. Ex: "/a/b" has two elements ("a" and "b").
+            // Algorithm:
+            // 1. If paths are neither both absolute nor both relative, then we cannot do anything (we need to make them absolute, but need additional info on how to make it). Return.
+            // 2. If both paths are absolute and root isn't the same (for Windows only, as roots are of the type "C:", "D:"), then the operation is impossible. Return.
+            // 3. Iterate over two paths elements until elements are equal
+            // 4. For each remaining element in "from", add ".." to result
+            // 5. For each remaining element in "to", add this element to result
 
-			// 1 & 2
-			const std::string root = osgDB::getPathRoot(from);
-			if (root != osgDB::getPathRoot(to)) {
-				OSG_INFO << "Cannot relativise paths. From=" << from << ", To=" << to << ". Returning 'to' unchanged." << std::endl;
-				//return to;
-				return osgDB::getSimpleFileName(to);
-			}
+            // 1 & 2
+            const std::string root = osgDB::getPathRoot(from);
+            if (root != osgDB::getPathRoot(to)) {
+                OSG_INFO << "Cannot relativise paths. From=" << from << ", To=" << to << ". Returning 'to' unchanged." << std::endl;
+                //return to;
+                return osgDB::getSimpleFileName(to);
+            }
 
-			// 3
-			PathIterator itFrom(from), itTo(to);
-			// Iterators may point to Windows roots. As we tested they are equal, there is no need to ++itFrom and ++itTo.
-			// However, if we got an Unix root, we must add it to the result.
-			// std::string res(root == "/" ? "/" : "");
-			// Since result is a relative path, even in unix, no need to add / to the result first.
-			std::string res = "";
-			for(; itFrom.valid() && itTo.valid() && *itFrom==*itTo; ++itFrom, ++itTo) {}
+            // 3
+            PathIterator itFrom(from), itTo(to);
+            // Iterators may point to Windows roots. As we tested they are equal, there is no need to ++itFrom and ++itTo.
+            // However, if we got an Unix root, we must add it to the result.
+            // std::string res(root == "/" ? "/" : "");
+            // Since result is a relative path, even in unix, no need to add / to the result first.
+            std::string res = "";
+            for (; itFrom.valid() && itTo.valid() && *itFrom == *itTo; ++itFrom, ++itTo) {}
 
-			// 4
-			for(; itFrom.valid(); ++itFrom) res += "../";
+            // 4
+            for (; itFrom.valid(); ++itFrom) res += "../";
 
-			// 5
-			for(; itTo.valid(); ++itTo) res += *itTo + "/";
+            // 5
+            for (; itTo.valid(); ++itTo) res += *itTo + "/";
 
-			// Remove trailing slash before returning
-			if (!res.empty() && std::find_first_of(res.rbegin(), res.rbegin()+1, PATH_SEPARATORS, PATH_SEPARATORS+PATH_SEPARATORS_LEN) != res.rbegin()+1)
-			{
-				return res.substr(0, res.length()-1);
-			}
-			return res;
-			}
+            // Remove trailing slash before returning
+            if (!res.empty() && std::find_first_of(res.rbegin(), res.rbegin() + 1, PATH_SEPARATORS, PATH_SEPARATORS + PATH_SEPARATORS_LEN) != res.rbegin() + 1)
+            {
+                return res.substr(0, res.length() - 1);
+            }
+            return res;
+        }
     };
 }
 
@@ -330,13 +337,20 @@ namespace
         return 0L;
     }
 
-    bool addLayer(const Config& conf, Map* map)
+    bool addLayer(const Config& conf, LayerVector& layers)
     {
-        std::string name = conf.key();
-        Layer* layer = Layer::create(name, conf);
-        if (layer)
+        auto layer = Layer::create(conf);
+        if (layer.valid())
         {
-            map->addLayer(layer);
+            layers.push_back(layer);
+
+            // Temp: force NVGL OFF to support the legacy splat library
+            const std::string splatLibrary("osgEarthSplat");
+            if (std::string(layer->libraryName()) == splatLibrary)
+            {
+                GLUtils::useNVGL(false);
+                OE_WARN << LC << "DISABLED NVGL after detecting layer of type \"" << layer->libraryName() << "::" << layer->className() << "\"" << std::endl;
+            }
         }
         return layer != 0L;
     }
@@ -367,9 +381,136 @@ namespace
         for (unsigned i = 0; i < map->getNumLayers(); ++i)
         {
             const Layer* layer = map->getLayerAt(i);
-            if (layer->getStatus().isError())
+
+            if (layer->getStatus().isError() &&
+                layer->getOpenAutomatically() == true)
             {
                 OE_WARN << LC << layer->getTypeName() << " \"" << layer->getName() << "\" : " << layer->getStatus().toString() << std::endl;
+            }
+        }
+    }
+
+    void replaceV2withV3(Config& c, const std::string& newkey)
+    {
+        OE_WARN << LC << "Replacing key \"" << c.key() << "\" with \"" << newkey << "\"; please update your earth file" << std::endl;
+        c.key() = newkey;
+    }
+
+    void updateVersion2ToVersion3(Config& c)
+    {
+        std::string key0 = c.key();
+
+        if (c.key() == "image" && c.hasValue("driver"))
+        {
+            const std::string& driver = c.value("driver");
+            if (driver == "gdal") c.key() = "GDALImage";
+            else if (driver == "mbtiles") replaceV2withV3(c, "MBTilesImage");
+            else if (driver == "arcgisonline") replaceV2withV3(c, "ArcGISServerImage");
+            else if (driver == "arcgis") replaceV2withV3(c, "ArcGISServerImage");
+            else if (driver == "tilepackage") replaceV2withV3(c, "ArcGISTilePackageImage");
+            else if (driver == "bing") replaceV2withV3(c, "BingImage");
+            else if (driver == "cesiumion") replaceV2withV3(c, "CesiumIonImage");
+            else if (driver == "landcover") replaceV2withV3(c, "LandCover");
+            else if (driver == "tilecache") replaceV2withV3(c, "TileCacheImage");
+            else if (driver == "tms") replaceV2withV3(c, "TMSImage");
+            else if (driver == "video") replaceV2withV3(c, "VideoImage");
+            else if (driver == "wms") replaceV2withV3(c, "WMSImage");
+            else if (driver == "xyz") replaceV2withV3(c, "XYZImage");
+            else if (driver == "agglite") replaceV2withV3(c, "FeatureImage");
+            else if (driver == "debug") replaceV2withV3(c, "DebugImage");
+            else if (driver == "road_surface") replaceV2withV3(c, "RoadSurface");
+            else if (driver == "db") replaceV2withV3(c, "DBImage");
+            else if (driver == "composite" && !c.children().empty())
+            {
+                ConfigSet children = c.children("image");
+                c.remove("image");
+                Config layers("layers");
+                layers.add(children);
+                c.add(layers);
+                replaceV2withV3(c, "CompositeImage");
+            }
+        }
+        else if (c.key() == "elevation" && c.hasValue("driver"))
+        {
+            const std::string& driver = c.value("driver");
+            if (driver == "gdal") replaceV2withV3(c, "GDALElevation");
+            else if (driver == "mbtiles") replaceV2withV3(c, "MBTilesElevation");
+            else if (driver == "bing") replaceV2withV3(c, "BingElevation");
+            else if (driver == "tms") replaceV2withV3(c, "TMSElevation");
+            else if (driver == "xyz") replaceV2withV3(c, "XYZElevation");
+            else if (driver == "tilecache") replaceV2withV3(c, "TileCacheElevation");
+            else if (driver == "flatten_elevation") replaceV2withV3(c, "FlattenElevation");
+            else if (driver == "fractal_elevation") replaceV2withV3(c, "FractalElevation");
+            else if (driver == "db") replaceV2withV3(c, "DBElevation");
+            else if (driver == "composite" && !c.children().empty())
+            {
+                ConfigSet children = c.children("elevation");
+                c.remove("elevation");
+                Config layers("layers");
+                layers.add(children);
+                c.add(layers);
+                replaceV2withV3(c, "CompositeElevation");
+            }
+        }
+        else if (c.key() == "model" && c.hasValue("driver"))
+        {
+            const std::string& driver = c.value("driver");
+            if (driver == "simple") replaceV2withV3(c, "Model");
+            else if (driver == "feature_geom") replaceV2withV3(c, "FeatureModel");
+        }
+        else if (c.key() == "mask" && c.hasValue("driver"))
+        {
+            const std::string& driver = c.value("driver");
+            if (driver == "feature") c.key() = "FeatureMask";
+        }
+        else if (c.key() == "feature_source" || c.key() == "features")
+        {
+            const std::string& driver = c.value("driver");
+            if (driver == "ogr") replaceV2withV3(c, "OGRFeatures");
+            else if (driver == "wfs") replaceV2withV3(c, "WFSFeatures");
+            else if (driver == "tfs") replaceV2withV3(c, "TFSFeatures");
+            else if (driver == "mapnikvectortiles") replaceV2withV3(c, "MVTFeatures");
+            else if (driver == "xyz") replaceV2withV3(c, "XYZFeatures");
+            else if (driver == "image_to_feature") replaceV2withV3(c, "ImageToFeature");
+        }
+        else if (c.key() == "splat_imagery") replaceV2withV3(c, "SplatImage");
+        else if (c.key() == "splat_groundcover") replaceV2withV3(c, "GroundCover");
+        else if (c.key() == "land_cover") replaceV2withV3(c, "LandCover");
+
+        if (key0 != c.key())
+        {
+            c.remove("driver");
+        }
+
+        for (ConfigSet::iterator j = c.children().begin(); j != c.children().end(); ++j)
+        {
+            updateVersion2ToVersion3(*j);
+        }
+    }
+
+    // Look for the first layer with basemap=true set, and adopt this layer's
+    // profile as the map profile.
+    void checkForProfileLayer(Map* map)
+    {
+        const std::string& profileLayer = const_cast<const Map*>(map)->options().profileLayer().get();
+        if (profileLayer.empty())
+            return;
+
+        TileLayerVector layers;
+        map->getLayers(layers);
+        for(TileLayerVector::const_iterator i = layers.begin();
+            i != layers.end();
+            ++i)
+        {
+            const TileLayer* layer = i->get();
+            if (profileLayer == layer->getName())
+            {
+                const Profile* profile = layer->getProfile();
+                if (profile)
+                {
+                    map->setProfile(profile);
+                    break;
+                }
             }
         }
     }
@@ -383,53 +524,63 @@ _rewriteAbsolutePaths( false )
 }
 
 
-osg::Node*
-EarthFileSerializer2::deserialize( const Config& conf, const std::string& referrer ) const
+osg::ref_ptr<osg::Node>
+EarthFileSerializer2::deserialize( 
+    const Config& const_conf, 
+    const std::string& referrer,
+    const osgDB::Options* readOptions) const
 {
+    Config conf = const_conf;
+
     // First, pre-load any extension DLLs.
     preloadExtensionLibs(conf);
     preloadExtensionLibs(conf.child("extensions"));
     preloadExtensionLibs(conf.child("external"));
 
-    MapOptions mapOptions( conf.child( "options" ) );
+    Map::Options mapOptions(conf.child("options"));
 
-    // legacy: check for name/type in top-level attrs:
+    // Check for name/type in top-level attrs:
     if ( conf.hasValue( "name" ) || conf.hasValue( "type" ) )
     {
-        Config legacy;
-        if ( conf.hasValue("name") ) legacy.add( "name", conf.value("name") );
-        if ( conf.hasValue("type") ) legacy.add( "type", conf.value("type") );
-        mapOptions.mergeConfig( legacy );
+        Config temp;
+        if ( conf.hasValue("name") ) temp.set( "name", conf.value("name") );
+        if ( conf.hasValue("type") ) temp.set( "type", conf.value("type") );
+        mapOptions.merge(ConfigOptions(temp));
     }
 
-    osg::ref_ptr< Map > map = new Map( mapOptions );
+    // Check for NVGL override
+    if (conf.hasValue("nvgl"))
+    {
+        GLUtils::useNVGL(conf.value<bool>("nvgl", true));
+        Config temp;
+        temp.add(conf.child("nvgl"));
+        mapOptions.merge(ConfigOptions(temp));
+    }
+
+    // Check for profile layer setting
+    if (conf.hasValue("profile_layer"))
+    {
+        std::string profileLayer = conf.value("profile_layer");
+        if (!profileLayer.empty())
+            mapOptions.profileLayer() = profileLayer;
+    }
+
+    osg::ref_ptr<Map> map = new Map(mapOptions, readOptions);
+
+    if (map->getProfile() == nullptr)
+        return nullptr;
+
+    // First go through and update to version 3.
+    updateVersion2ToVersion3(conf);
 
     // Start a batch update of the map:
     map->beginUpdate();
 
-    // Read all the elevation layers in FIRST so other layers can access them for things like clamping.
-    // TODO: revisit this since we should really be listening for elevation data changes and
-    // re-clamping based on that..
-    for(ConfigSet::const_iterator i = conf.children().begin(); i != conf.children().end(); ++i)
-    {
-        // for backwards compatibility:
-        if (i->key() == "heightfield")
-        {
-            Config temp = *i;
-            temp.key() = "elevation";
-            addLayer(temp, map.get());
-        }
-
-        else if ( i->key() == "elevation" ) // || i->key() == "heightfield" )
-        {
-            addLayer(*i, map.get());
-        }
-    }
-
+    LayerVector layers;
     Config externalConfig;
     std::vector<osg::ref_ptr<Extension> > extensions;
-
-    // Read the layers in LAST (otherwise they will not benefit from the cache/profile configuration)
+    bool forceDisableNVGL = false;
+    
     for(ConfigSet::const_iterator i = conf.children().begin(); i != conf.children().end(); ++i)
     {
         if (i->key() == "options" || i->key() == "name" || i->key() == "type" || i->key() == "version")
@@ -437,24 +588,24 @@ EarthFileSerializer2::deserialize( const Config& conf, const std::string& referr
             // nop - handled earlier
         }
 
-        else if ( i->key() == "external" || i->key() == "extensions" )
+        else if ( i->key() == "external" )
         {
             externalConfig = *i;
             
-            for(ConfigSet::const_iterator e = i->children().begin(); e != i->children().end(); ++e)
-            {
-                Extension* extension = loadExtension(*e);
-                if (extension)
-                    extensions.push_back(extension);
-            }
+            //for(ConfigSet::const_iterator e = i->children().begin(); e != i->children().end(); ++e)
+            //{
+            //    Extension* extension = loadExtension(*e);
+            //    if (extension)
+            //        extensions.push_back(extension);
+            //}
         }
 
-        else if ( !isReservedWord(i->key()) ) // plugins/extensions.
+        else if ( !isReservedWord(i->key()) )
         {
-            // try to add as a plugin Layer first:
-            bool addedLayer = addLayer(*i, map.get()); 
+            // try to add as a Layer first:
+            bool addedLayer = addLayer(*i, layers); 
 
-            // failing that, try to load as an extension:
+            // failing that, try to load as an Extension:
             if ( !addedLayer )
             {
                 Extension* extension = loadExtension(*i);
@@ -464,14 +615,27 @@ EarthFileSerializer2::deserialize( const Config& conf, const std::string& referr
         }
     }
 
+    // Add our layers as a batch
+    map->addLayers(layers);
+
     // Complete the batch update of the map
     map->endUpdate();
+    
+    // Check for a "basemap" layer that will set the map's profile.
+    checkForProfileLayer(map.get());
 
     // If any errors occurred, report them now.
     reportErrors(map.get());
 
-    // Yes, MapOptions and MapNodeOptions share the same Config node. Weird but true.
-    MapNodeOptions mapNodeOptions( conf.child("options") );
+    // Yes, Map::Options and MapNode::Options share the same Config node. Weird but true.
+    MapNode::Options mapNodeOptions( conf.child("options") );
+
+    if (readOptions && (
+        readOptions->getOptionString().find("OSGEARTH_USE_NVGL") != std::string::npos ||
+        readOptions->getOptionString().find("OSGEARTH_USE_GL4") != std::string::npos))
+    {
+        GLUtils::useNVGL(true);
+    }
 
     // Create a map node.
     osg::ref_ptr<MapNode> mapNode = new MapNode( map.get(), mapNodeOptions );
@@ -490,10 +654,12 @@ EarthFileSerializer2::deserialize( const Config& conf, const std::string& referr
 
     // return the topmost parent of the mapnode. It's possible that
     // an extension added parents!
-    osg::Node* top = mapNode.release();
+    osg::ref_ptr<osg::Node> top = mapNode;
 
-    while( top->getNumParents() > 0 )
+    while (top->getNumParents() > 0)
+    {
         top = top->getParent(0);
+    }
 
     return top;
 }

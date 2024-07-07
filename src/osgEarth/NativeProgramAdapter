@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -19,22 +19,25 @@
 #ifndef OSGEARTH_NATIVE_PROGRAM_ADAPTER
 #define OSGEARTH_NATIVE_PROGRAM_ADAPTER
 
+#include "Common"
+#include "GLUtils"
+
 #include <osg/State>
 #include <osg/Uniform>
 #include <osg/GL2Extensions>
 #include <osg/Referenced>
 #include <osg/MixinVector>
-#include <osgEarth/Notify>
-#include <osgEarth/Common>
+#include <unordered_map>
 #include <vector>
 
 #undef  LC
 #define LC "[NativeProgramAdapter] "
 
+#define OE_LOCAL OE_DEBUG
 //#undef  OE_DEBUG
 //#define OE_DEBUG OE_INFO
 
-namespace osgEarth
+namespace osgEarth { namespace Util
 {
     /**
      * Wraps a native glProgram handle so we can earch it form uniforms and
@@ -44,12 +47,13 @@ namespace osgEarth
     {
     public:
         /** Create a program adapter under the current state that wraps the provided glProgram handle. */
-        NativeProgramAdapter(const osg::State* state, GLint handle, const char* prefix, const std::string& name)
+        NativeProgramAdapter(const osg::State* state, GLint handle, const std::vector<const char*> prefixes, const std::string& name)
         {
-            OE_DEBUG << LC << "Create adapter for glProgram " << name << std::endl;
+            OE_LOCAL << LC << "Create adapter for glProgram " << name << " (handle=" << handle << ")" << std::endl;
 
             _handle = handle;
-            _ext    = osg::GL2Extensions::Get( state->getContextID(), true );
+            if (state)
+                _ext = osg::GL2Extensions::Get(GLUtils::getSharedContextID(*state), true);
 
             GLint   numUniforms = 0;
             GLsizei maxLen      = 0;
@@ -57,41 +61,83 @@ namespace osgEarth
             _ext->glGetProgramiv( _handle, GL_ACTIVE_UNIFORMS,      &numUniforms );
             _ext->glGetProgramiv( _handle, GL_ACTIVE_UNIFORM_MAX_LENGTH, &maxLen );
 
-            if ( (numUniforms > 0) && (maxLen > 1) )
+            std::vector<std::string> uniformNames;
+
+            if ((numUniforms > 0) && (maxLen > 1))
             {
                 GLint   size = 0;
                 GLenum  type = 0;
                 GLchar* name = new GLchar[maxLen];
 
-                for( GLint i = 0; i < numUniforms; ++i )
+                for (GLint i = 0; i < numUniforms; ++i)
                 {
-                    _ext->glGetActiveUniform( _handle, i, maxLen, 0, &size, &type, name );      
-                    if ( !prefix || (::strlen(name) >= ::strlen(prefix) && ::strncmp(name, prefix, ::strlen(prefix)) == 0) )
+                    _ext->glGetActiveUniform(_handle, i, maxLen, 0, &size, &type, name);
+                    uniformNames.push_back(std::string(name));
+                }
+            }
+
+            for(auto& uniformName : uniformNames)
+            {
+                bool use_uniform = true;
+
+                if (!prefixes.empty())
+                {
+                    use_uniform = false;
+                    for (auto& prefix : prefixes)
                     {
-                        GLint loc = _ext->glGetUniformLocation( _handle, name );
-                        if ( loc != -1 )
+                        if (Strings::startsWith(uniformName, prefix))
                         {
-                            _uniformLocations[osg::Uniform::getNameID(reinterpret_cast<const char*>(name))] = loc;
-                        
-                            OE_DEBUG << LC << "    Uniform = \"" << name << "\", location = " << loc << std::endl;
+                            use_uniform = true;
+                            break;
                         }
                     }
                 }
-            }
-            else
-            {
-                OE_DEBUG << LC << "    No uniforms found." << std::endl;
+
+                if (use_uniform)
+                {
+                    GLint loc = _ext->glGetUniformLocation(_handle, uniformName.c_str());
+                    if ( loc != -1 )
+                    {
+                        _uniformLocations[osg::Uniform::getNameID(uniformName)] = loc;
+                        OE_LOCAL << LC << "    Uniform = \"" << uniformName << "\", location = " << loc << std::endl;
+                    }
+                }
             }
         }
 
         void apply(const osg::State* state)
         {
-            reinterpret_cast<const StateEx*>(state)->applyUniformsToProgram(*this);
+            bool useProgram = true;
+            for (osg::State::UniformMap::const_iterator i = state->getUniformMap().begin(); i != state->getUniformMap().end(); ++i)
+            {
+                const osg::State::UniformStack& as = i->second;
+                if (!as.uniformVec.empty())
+                {
+                    const osg::Uniform* uniform = static_cast<const osg::Uniform*>(as.uniformVec.back().first);
+                    if (apply(uniform, useProgram))
+                        useProgram = false;
+                }
+            }
+
+            if (state->getUseModelViewAndProjectionUniforms())
+            {
+                // Apply each of the osg_*Matrix uniforms, which may be used by the native program
+                osg::State* ncState = const_cast<osg::State*>(state);
+
+                if (apply(ncState->getModelViewMatrixUniform(), useProgram))
+                    useProgram = false;
+                if (apply(ncState->getProjectionMatrixUniform(), useProgram))
+                    useProgram = false;
+                if (apply(ncState->getModelViewProjectionMatrixUniform(), useProgram))
+                    useProgram = false;
+                if (apply(ncState->getNormalMatrixUniform(), useProgram))
+                    useProgram = false;
+            }
         }
 
     private:
         GLint  _handle;
-        typedef std::map<unsigned, GLint> UniformMap;
+        using UniformMap = std::unordered_map<unsigned, GLint>;
         UniformMap _uniformLocations;
         const osg::GL2Extensions* _ext;
 
@@ -112,36 +158,6 @@ namespace osgEarth
             }
             else return false;
         }
-
-        struct StateEx : public osg::State 
-        {
-            void applyUniformsToProgram(const NativeProgramAdapter& adapter) const
-            {
-                bool useProgram = true;
-                for(UniformMap::const_iterator i = _uniformMap.begin(); i != _uniformMap.end(); ++i)
-                {
-                    const UniformStack& as = i->second;
-                    if ( !as.uniformVec.empty() )
-                    {                    
-                        const osg::Uniform* uniform = static_cast<const osg::Uniform*>(as.uniformVec.back().first);
-                        if (adapter.apply(uniform, useProgram))
-                            useProgram = false;
-                    }
-                }
-
-                // Apply each of the osg_*Matrix uniforms, which may be used by the native program
-                if (adapter.apply(_modelViewMatrixUniform.get(), useProgram))
-                    useProgram = false;
-                if (adapter.apply(_projectionMatrixUniform.get(), useProgram))
-                    useProgram = false;
-                if (adapter.apply(_modelViewProjectionMatrixUniform.get(), useProgram))
-                    useProgram = false;
-                if (adapter.apply(_normalMatrixUniform.get(), useProgram))
-                    useProgram = false;
-            }
-        };
-
-        friend struct StateEx;
     };
 
     /**
@@ -157,7 +173,7 @@ namespace osgEarth
         }
     };
 
-}
+} }
 
 #undef LC
 

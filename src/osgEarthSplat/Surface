@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -16,11 +16,10 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
-#ifndef OSGEARTH_PROCEDURAL_SURFACE
-#define OSGEARTH_PROCEDURAL_SURFACE 1
+#ifndef OSGEARTH_SPLAT_SURFACE
+#define OSGEARTH_SPLAT_SURFACE 1
 
 #include "Export"
-#include "Coverage"
 #include "SplatCatalog"
 #include <osgEarth/Common>
 #include <osgEarth/Config>
@@ -97,6 +96,10 @@ namespace osgEarth { namespace Splat
         osg::StateSet* getOrCreateStateSet();
         osg::StateSet* getStateSet() const { return _stateSet.get(); }
 
+        void resizeGLObjectBuffers(unsigned maxSize);
+
+        void releaseGLObjects(osg::State* state) const;
+
     protected:
         virtual ~Surface() { }
 
@@ -117,4 +120,5 @@ namespace osgEarth { namespace Splat
 
 OSGEARTH_SPECIALIZE_CONFIG(osgEarth::Splat::SurfaceOptions);
 
-#endif // OSGEARTH_PROCEDURAL_SURFACE
+#endif // OSGEARTH_SPLAT_SURFACE
+

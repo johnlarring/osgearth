@@ -1,14 +1,15 @@
 #
 # texture splatting plugin
 #
-
-IF   (DYNAMIC_OSGEARTH)
-    ADD_DEFINITIONS(-DOSGEARTHSPLAT_LIBRARY)
-ELSE (DYNAMIC_OSGEARTH)
-    ADD_DEFINITIONS(-DOSGEARTHSPLAT_LIBRARY_STATIC)
-ENDIF(DYNAMIC_OSGEARTH)
-
 SET(LIB_NAME osgEarthSplat)
+
+set(OSGEARTH_HAVE_LEGACY_SPLAT_NODEKIT ON PARENT_SCOPE) # for BuildConfig
+
+if(OSGEARTH_BUILD_SHARED_LIBS)
+    ADD_DEFINITIONS(-DOSGEARTHSPLAT_LIBRARY)
+else()
+    ADD_DEFINITIONS(-DOSGEARTHSPLAT_LIBRARY_STATIC)
+endif()
 
 set(TARGET_GLSL
     Splat.types.glsl
@@ -17,10 +18,14 @@ set(TARGET_GLSL
     Splat.vert.view.glsl
     Splat.frag.glsl
     Splat.util.glsl
-    GroundCover.TCS.glsl
-    GroundCover.TES.glsl
-    GroundCover.GS.glsl
-    GroundCover.FS.glsl )
+    Splat.GroundCover.CS.glsl
+    Splat.GroundCover.Sort.CS.glsl
+    Splat.GroundCover.Billboard.glsl
+    Splat.GroundCover.Model.glsl
+    Splat.GroundCover.Generate.CS.glsl
+    Splat.GroundCover.Render.glsl
+    Splat.GroundCover.Types.glsl
+    Splat.Grass.glsl)
 
 set(SHADERS_CPP "${CMAKE_CURRENT_BINARY_DIR}/AutoGenShaders.cpp")
 
@@ -33,64 +38,45 @@ set(TARGET_IN
     SplatShaders.cpp.in)
 
 set(TARGET_SRC
-    Coverage.cpp
-    GroundCover.cpp
+    Biome.cpp
+    GrassLayer.cpp
+    GroundCoverFeatureGenerator.cpp
+    GroundCoverFeatureSource.cpp
     GroundCoverLayer.cpp
-    LandUseTileSource.cpp
     NoiseTextureFactory.cpp
     RoadSurfaceLayer.cpp
 	SplatCatalog.cpp
     SplatLayer.cpp
-	SplatCoverageLegend.cpp
     Surface.cpp
     Zone.cpp
+    OldInstanceCloud.cpp
     ${SHADERS_CPP})
 	
-set(LIB_PUBLIC_HEADERS
-    Coverage
+set(TARGET_H
+    Biome
 	Export
-    GroundCover
+    GrassLayer
+    GroundCoverFeatureGenerator
+    GroundCoverFeatureSource
     GroundCoverLayer
-    LandUseTileSource
     NoiseTextureFactory
     RoadSurfaceLayer
-	SplatCoverageLegend
 	SplatCatalog
-	SplatOptions
     SplatShaders
     SplatLayer
     Surface
-    Zone)
+    Zone
+    OldInstanceCloud)
 	
-SET(TARGET_H
-	${LIB_PUBLIC_HEADERS}
-	SplatShaders)
+add_osgearth_library(
+    TARGET ${LIB_NAME}
+    SOURCES ${TARGET_SRC}
+    PUBLIC_HEADERS ${TARGET_H}
+    SHADERS ${TARGET_GLSL}
+    TEMPLATES ${TARGET_IN}
+    FOLDER "NodeKits")
 
-ADD_LIBRARY(${LIB_NAME} ${OSGEARTH_USER_DEFINED_DYNAMIC_OR_STATIC}
-    ${LIB_PUBLIC_HEADERS}
-    ${TARGET_SRC}
-    ${TARGET_GLSL}
-    ${TARGET_IN}
-)
+target_link_libraries(${LIB_NAME} PRIVATE OpenGL::GL)
 
-IF (WIN32)
-  LINK_EXTERNAL(${LIB_NAME} ${TARGET_EXTERNAL_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} ${MATH_LIBRARY})
-ELSE(WIN32)
-  LINK_EXTERNAL(${LIB_NAME} ${TARGET_EXTERNAL_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT} ${MATH_LIBRARY})
-ENDIF(WIN32)
 
-LINK_INTERNAL(${LIB_NAME}
-    osgEarth
-    osgEarthFeatures
-    osgEarthSymbology
-    osgEarthAnnotation
-    osgEarthUtil
-)
 
-LINK_WITH_VARIABLES(${LIB_NAME} OSG_LIBRARY OSGUTIL_LIBRARY OSGSIM_LIBRARY OSGTERRAIN_LIBRARY OSGDB_LIBRARY OSGFX_LIBRARY OSGMANIPULATOR_LIBRARY OSGVIEWER_LIBRARY OSGTEXT_LIBRARY OSGGA_LIBRARY OSGSHADOW_LIBRARY OPENTHREADS_LIBRARY)
-LINK_CORELIB_DEFAULT(${LIB_NAME} ${CMAKE_THREAD_LIBS_INIT} ${MATH_LIBRARY})
-
-# Add this project to the NodeKits solution folder
-set_property( TARGET ${LIB_NAME} PROPERTY FOLDER "NodeKits" )
-
-INCLUDE(ModuleInstall OPTIONAL)

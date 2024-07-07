@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2012 Pelican Mapping
 * http://osgearth.org
 *
@@ -24,24 +24,39 @@
 
 #include <osgEarth/ShaderLoader>
 
-namespace osgEarth
+namespace osgEarth { namespace Util
 {
     class OSGEARTH_EXPORT Shaders : public ShaderPackage
 	{
     public:
         Shaders();
 
-        std::string ClipPlane;
-        std::string DepthOffsetVertex;
-        std::string DrapingVertex, DrapingFragment;
-        std::string GPUClampingVertex, GPUClampingFragment, GPUClampingVertexLib;
-        std::string InstancingVertex;
+        std::string CascadeDraping;
+        std::string Chonk;
+        std::string ChonkCulling;
+        std::string DepthOffset;
+        std::string Draping;
+        std::string DrawInstancedAttribute;
+        std::string GPUClamping, GPUClampingLib;
+        std::string HexTilingLib;
+        std::string Instancing;
         std::string LineDrawable;
+        std::string WireLines;
         std::string PointDrawable;
-        std::string PhongLightingVertex, PhongLightingFragment;
-        std::string TextVertex, TextFragment, TextLegacy;
+        std::string PhongLighting;
+        std::string Text, TextLegacy;
+        std::string ContourMap;
+        std::string GeodeticGraticule;
+        std::string LogDepthBuffer;
+        std::string LogDepthBuffer_VertOnly;
+        std::string ShadowCaster;
+        std::string SimpleOceanLayer;
+        std::string RTTPicker;
+        std::string WindComputer;
+        std::string PBR;
+        std::string MetadataNode;
 	};	
 
-} // namespace osgEarth
+} } 
 
 #endif // OSGEARTH_SHADERS

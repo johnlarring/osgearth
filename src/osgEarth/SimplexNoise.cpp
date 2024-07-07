@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -19,11 +19,14 @@
 
 #include <osgEarth/SimplexNoise>
 #include <osgEarth/ImageUtils>
+#include <osgEarth/Notify>
 #include <algorithm>
 
 #define POW2(x) ((double)(x==0 ? 1 : (2 << (x-1))))
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
+using namespace osgEarth::Util;
 
 const SimplexNoise::Grad SimplexNoise::grad3[12] = {
     Grad(1, 1, 0), Grad(-1, 1, 0), Grad(1, -1, 0), Grad(-1, -1, 0),
@@ -701,7 +704,7 @@ SimplexNoise::createSeamlessImage(unsigned dim) const
         {
             for (unsigned t = 0; t < dim; ++t)
             {
-                value = read(s, t);
+                read(value, s, t);
                 value.r() = (value.r()+bias)*scale;
                 write(value, s, t);
             }

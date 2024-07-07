@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -22,12 +22,14 @@
 #include <osgEarth/ImageToHeightFieldConverter>
 #include <osgEarth/Registry>
 #include <osgEarth/Progress>
+#include <osgDB/ReadFile>
 #include <osgDB/FileUtils>
 #include <osgDB/FileNameUtils>
 
 #define LC "[TileSource] "
 
 using namespace osgEarth;
+using namespace osgEarth::Contrib;
 
 //#undef OE_DEBUG
 //#define OE_DEBUG OE_INFO
@@ -114,21 +116,14 @@ TileBlacklist::write(const std::string &filename) const
     write(out);
 }
 
-namespace {
-    struct WriteFunctor : public LRUCache<TileKey,bool>::Functor {
-        std::ostream& _out;
-        WriteFunctor(std::ostream& out) : _out(out) { }
-        void operator()(const TileKey& key, const bool& value) {
-            _out << key.getLOD() << ' ' << key.getTileX() << ' ' << key.getTileY() << std::endl;
-        }
-    };
-}
-
 void
 TileBlacklist::write(std::ostream &output) const
 {
-    WriteFunctor writer(output);
-    _tiles.iterate(writer);
+    _tiles.forEach(
+        [&output](const TileKey& key, const bool& value) mutable {
+            output << key.getLOD() << ' ' << key.getTileX() << ' ' << key.getTileY() << std::endl;
+        }
+    );
 }
 
 
@@ -413,8 +408,8 @@ TileSource::createHeightField(const TileKey&        key,
 
 bool
 TileSource::storeHeightField(const TileKey&     key,
-                             osg::HeightField*  hf,
-                              ProgressCallback* progress)
+                             const osg::HeightField*  hf,
+                             ProgressCallback* progress)
 {
     if (getStatus().isError() || hf == 0L )
         return 0L;

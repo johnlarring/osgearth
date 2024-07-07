@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -31,11 +31,12 @@
 #include <osgEarth/CullingUtils>
 #include <osgEarth/LineDrawable>
 #include <osgEarth/Lighting>
-#include <osgEarthUtil/EarthManipulator>
-#include <osgEarthUtil/ExampleResources>
-#include <osgEarthUtil/Sky>
-#include <osgEarthSymbology/Color>
-#include <osgEarthAnnotation/LabelNode>
+#include <osgEarth/EarthManipulator>
+#include <osgEarth/ExampleResources>
+#include <osgEarth/Sky>
+#include <osgEarth/Color>
+#include <osgEarth/LabelNode>
+#include <osgEarth/Controls>
 #include <osgViewer/Viewer>
 #include <iostream>
 
@@ -43,14 +44,12 @@
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
-using namespace osgEarth::Symbology;
-using namespace osgEarth::Annotation;
 namespace ui = osgEarth::Util::Controls;
 
 int
 usage(const char* name, const char* msg)
 {
-    OE_NOTICE 
+    OE_NOTICE
         << "\nUsage: " << name << " [file.earth]\n"
         << "     --tle <filename>    : Load a NORAD TLE file\n"
         << "     --maxpoints <num>   : Limit the track size to <num> points\n"
@@ -62,10 +61,10 @@ usage(const char* name, const char* msg)
     return 0;
 }
 
-// Reference time for the J2000 ECI coordinate frame 
+// Reference time for the J2000 ECI coordinate frame
 static DateTime J2000Epoch(2000, 1, 1, 12.00);
 
-// Transform that takes us from a J2000 ECI reference frame 
+// Transform that takes us from a J2000 ECI reference frame
 // to an ECEF reference frame (i.e. MapNode)
 class J2000ToECEFTransform : public osg::MatrixTransform
 {
@@ -83,7 +82,7 @@ public:
 
         double secondsElapsed = (double)(dt.asTimeStamp() - J2000Epoch.asTimeStamp());
         const double rotation = IAU_EARTH_ANGULAR_VELOCITY * secondsElapsed;
-        
+
         osg::Matrix matrix;
         matrix.makeRotate(rotation, 0, 0, 1);
         return matrix;
@@ -127,7 +126,7 @@ struct ECITrack : public std::vector<ECILocation>
 
                 newTrack.push_back(ECILocation());
                 ECILocation& loc = newTrack.back();
-                
+
                 loc.timestamp = DateTime(p0.timestamp.asTimeStamp() + (p1.timestamp.asTimeStamp()-p0.timestamp.asTimeStamp())*t);
                 loc.raan.set(p0.raan.as(Units::RADIANS) + (p1.raan.as(Units::RADIANS)-p0.raan.as(Units::RADIANS))*t, Units::RADIANS);
                 loc.incl.set(p0.incl.as(Units::RADIANS) + (p1.incl.as(Units::RADIANS)-p0.incl.as(Units::RADIANS))*t, Units::RADIANS);
@@ -208,27 +207,24 @@ public:
     ECITrackDrawable() : LineDrawable(GL_LINE_STRIP)
     {
         Lighting::set(getOrCreateStateSet(), 0);
-        //setPointSmooth(true);
-        //setPointSize(4.0f);
     }
 
     void setDateTime(const DateTime& dt)
     {
-        osg::FloatArray* times = dynamic_cast<osg::FloatArray*>(getVertexAttribArray(6));
         unsigned i;
         for (i = 0; i < getNumVerts(); ++i)
         {
-            if (dt.asTimeStamp() < getVertexAttrib(times, i))
+            if (dt.asTimeStamp() < getVertexAttrib(_times.get(), i))
                 break;
         }
         setCount(i);
     }
-    
+
     void load(const ECITrack& track, bool drawECEF)
     {
-        osg::FloatArray* times = new osg::FloatArray();
-        times->setBinding(osg::Array::BIND_PER_VERTEX);
-        setVertexAttribArray(6, times);
+        _times = new osg::FloatArray();
+        _times->setBinding(osg::Array::BIND_PER_VERTEX);
+        setVertexAttribArray(6, _times);
 
         osg::Vec4f HSLA;
         Color color;
@@ -237,15 +233,17 @@ public:
         {
             const ECILocation& loc = track[i];
             pushVertex(drawECEF? loc.ecef : loc.eci);
-            pushVertexAttrib(times, (float)loc.timestamp.asTimeStamp());
-            
+            pushVertexAttrib(_times.get(), (float)loc.timestamp.asTimeStamp());
+
             // simple color ramp
             HSLA.set((float)i/(float)(track.size()-1), 1.0f, 1.0f, 1.0f);
             color.fromHSL(HSLA);
-            setColor(i, color);      
+            setColor(i, color);
         }
         finish();
     }
+
+    osg::ref_ptr<osg::FloatArray> _times;
 };
 
 osg::Node* createECIAxes()
@@ -277,15 +275,15 @@ osg::Node* createECIAxes()
 struct App
 {
     DateTime start, end;
-    HSliderControl* time;
-    LabelControl* timeLabel;
+    ui::HSliderControl* time;
+    ui::LabelControl* timeLabel;
     SkyNode* sky;
     J2000ToECEFTransform* ecef;
     osg::Group* eci;
-    ECITrackDrawable* trackDrawable;    
+    ECITrackDrawable* trackDrawable;
     ECITrack track;
 
-    App() 
+    App()
     {
         trackDrawable = 0L;
         start = J2000Epoch;
@@ -315,6 +313,8 @@ OE_UI_HANDLER(setTime);
 int
 main(int argc, char** argv)
 {
+    osgEarth::initialize();
+
     osg::ArgumentParser arguments(&argc,argv);
     if ( arguments.read("--help") )
         return usage(argv[0], "");
@@ -348,34 +348,37 @@ main(int argc, char** argv)
     // UI control to modify the time of day.
     ui::HBox* h = container->addControl(new ui::HBox());
     h->addControl(new ui::LabelControl("Time:"));
-    app.time = h->addControl(new HSliderControl(
+    app.time = h->addControl(new ui::HSliderControl(
         app.start.asTimeStamp(), app.end.asTimeStamp(), app.start.asTimeStamp(),
         new setTime(app)));
     app.time->setWidth(500);
-    app.timeLabel = container->addControl(new LabelControl());
+    app.timeLabel = container->addControl(new ui::LabelControl());
 
-    // Load an earth file  
-    osg::Node* earth = MapNodeHelper().load(arguments, &viewer, container);
-    if (earth)
+    ui::ControlCanvas* canvas = new ui::ControlCanvas();
+    canvas->addChild(container);
+
+    // Load an earth file
+    auto earth = MapNodeHelper().load(arguments, &viewer);
+    if (earth.valid() && MapNode::get(earth))
     {
         // New scene graph root
         osg::Group* root = new osg::Group();
 
-        // First create a Sky which we will place in the (default) ECI frame.
+        // First create a Sky which we will place in the ECI frame.
         SkyOptions skyOptions;
         skyOptions.coordinateSystem() = SkyOptions::COORDSYS_ECI;
-        app.sky = SkyNode::create(MapNode::get(earth));
+        app.sky = SkyNode::create(skyOptions);
         app.sky->attach(&viewer);
         app.sky->getSunLight()->setAmbient(osg::Vec4(0.5,0.5,0.5,1.0));
         root->addChild(app.sky);
-        
+
         // A special transform takes us from the ECI into an ECEF frame
         // based on the current date and time.
         // The earth (MapNode) lives here since it is ECEF.
         app.ecef = new J2000ToECEFTransform();
         app.sky->addChild(app.ecef);
         app.ecef->addChild(earth);
-        
+
         // This group holds data in the ECI frame.
         app.eci = new ECIReferenceFrame();
         app.eci->addChild(createECIAxes());
@@ -398,6 +401,8 @@ main(int argc, char** argv)
                 app.eci->addChild(app.trackDrawable);
             }
         }
+
+        root->addChild(canvas);
 
         viewer.realize();
         app.time->setWidth(viewer.getCamera()->getViewport()->width()-40);

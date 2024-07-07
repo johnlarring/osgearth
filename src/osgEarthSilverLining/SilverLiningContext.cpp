@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -123,7 +123,7 @@ SilverLiningContext::initialize(osg::RenderInfo& renderInfo)
     if ( !_initAttempted && !_initFailed )
     {
         // lock/double-check:
-        Threading::ScopedMutexLock excl(_initMutex);
+        std::lock_guard<std::mutex> excl(_initMutex);
         if ( !_initAttempted && !_initFailed )
         {
             _initAttempted = true;
@@ -188,7 +188,11 @@ SilverLiningContext::initialize(osg::RenderInfo& renderInfo)
 void
 SilverLiningContext::setupClouds()
 {
-    ::SilverLining::CloudLayer* clouds = ::SilverLining::CloudLayerFactory::Create( ::CUMULUS_CONGESTUS );
+#ifdef OSGEARTH_SILVERLINING_USE_PRE_5_079_API
+    ::SilverLining::CloudLayer* clouds = ::SilverLining::CloudLayerFactory::Create(::CUMULUS_CONGESTUS);
+#else
+    ::SilverLining::CloudLayer* clouds = ::SilverLining::CloudLayerFactory::Create(::CUMULUS_CONGESTUS, *_atmosphere);
+#endif
     clouds->SetIsInfinite( true );
     clouds->SetFadeTowardEdges(true);
     clouds->SetBaseAltitude( 2000 );
@@ -220,7 +224,7 @@ SilverLiningContext::updateLight()
     ::SilverLining::Location clampedLoc = savedLoc;
     if ( _maxAmbientLightingAlt > 0.0 )
     {
-        clampedLoc.SetAltitude( std::min(clampedLoc.GetAltitude(), _maxAmbientLightingAlt) );
+        clampedLoc.SetAltitude( osg::minimum(clampedLoc.GetAltitude(), _maxAmbientLightingAlt) );
         _atmosphere->GetConditions()->SetLocation( clampedLoc );
     }
 
@@ -265,7 +269,7 @@ SilverLiningContext::updateLocation()
     // Get new local orientation
     osg::Vec3d up = _cameraPos;
     up.normalize();
-    osg::Vec3d north = osg::Vec3d(0, 1, 0);
+    osg::Vec3d north = _srs->isGeographic() ? osg::Vec3d(0, 0, 1) : osg::Vec3d(0, 1, 0);
     osg::Vec3d east = north ^ up;
 
     // Check for edge case of north or south pole
@@ -285,8 +289,8 @@ SilverLiningContext::updateLocation()
 
     ::SilverLining::Location loc;
     loc.SetAltitude ( latLonAlt.z() );
-    loc.SetLongitude( latLonAlt.x() ); //osg::DegreesToRadians(latLonAlt.x()) );
-    loc.SetLatitude ( latLonAlt.y() ); //osg::DegreesToRadians(latLonAlt.y()) );
+    loc.SetLongitude( latLonAlt.x() );
+    loc.SetLatitude ( latLonAlt.y() );
 
     _atmosphere->GetConditions()->SetLocation( loc );
 }

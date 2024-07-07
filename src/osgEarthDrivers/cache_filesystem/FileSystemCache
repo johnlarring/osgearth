@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -43,14 +43,16 @@ namespace osgEarth { namespace Drivers
         virtual ~FileSystemCacheOptions() { }
 
     public:
-        /** Root path of the cache folder */
-        optional<std::string>& rootPath() { return _path; }
-        const optional<std::string>& rootPath() const { return _path; }
+        OE_OPTION(std::string, rootPath);
+        OE_OPTION(unsigned, threads, 1u);
+        OE_OPTION(std::string, format, "osgb");
 
     public:
         virtual Config getConfig() const {
             Config conf = ConfigOptions::getConfig();
-            conf.set( "path", _path );
+            conf.set("path", rootPath() );
+            conf.set("threads", threads() );
+            conf.set("image_format", format());
             return conf;
         }
         virtual void mergeConfig( const Config& conf ) {
@@ -60,10 +62,10 @@ namespace osgEarth { namespace Drivers
 
     private:
         void fromConfig( const Config& conf ) {
-            conf.get( "path", _path );
+            conf.get("path", rootPath() );
+            conf.get("threads", threads() );
+            conf.get("image_format", format());
         }
-
-        optional<std::string> _path;
     };
 
 } } // namespace osgEarth::Drivers

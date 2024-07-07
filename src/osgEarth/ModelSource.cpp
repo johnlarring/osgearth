@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -21,7 +21,6 @@
 #include <osgDB/ReadFile>
 
 using namespace osgEarth;
-using namespace OpenThreads;
 
 /****************************************************************/
 
@@ -102,7 +101,6 @@ ModelSource::createNode(const Map*        map,
 
     osg::Node* node = createNodeImplementation(map, progress);
 
-    //TODO: consider moving this logic up into MapNode.
     if ( node && getSceneGraphCallbacks() )
     {
         getSceneGraphCallbacks()->firePreMergeNode(node);

@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2014 Pelican Mapping
 * http://osgearth.org
 *
@@ -25,14 +25,12 @@
 #include "Unloader"
 #include "TileNode"
 #include "TileNodeRegistry"
-#include "RexTerrainEngineOptions"
 #include "RenderBindings"
 #include "TileDrawable"
 
 #include <osgEarth/TerrainTileModel>
 #include <osgEarth/Progress>
 #include <osgEarth/TerrainEngineNode>
-#include <osgEarth/TileRasterizer>
 
 #include <osgUtil/CullVisitor>
 
@@ -41,10 +39,10 @@ using namespace osgEarth;
 #define ENGINE_CONTEXT_TAG "osgEarth::Rex::EngineContext"
 
 namespace osgEarth {
-    class TerrainEngine;
+    class FrameClock;
 }
 
-namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
+namespace osgEarth { namespace REX
 {
     class SelectionInfo;
 
@@ -52,21 +50,16 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
     {
     public:
         EngineContext(
-            const Map*                          map,
-            TerrainEngineNode*                  engine,
-            GeometryPool*                       geometryPool,
-            Loader*                             loader,
-            Unloader*                           unloader,
-            TileRasterizer*                     rasterizer,
-            TileNodeRegistry*                   liveTiles,
-            const RenderBindings&               renderBindings,
-            const RexTerrainEngineOptions&      options,
-            const SelectionInfo&                selectionInfo,
-            ModifyBoundingBoxCallback*          modifyBBoxCallback);
-        
-        Loader* getLoader() const { return _loader; }
+            const Map* map,
+            TerrainEngineNode* engine,
+            GeometryPool* geometryPool,
+            Merger* merger,
+            TileNodeRegistry::Ptr tiles,
+            const RenderBindings& renderBindings,
+            const SelectionInfo& selectionInfo,
+            const FrameClock* clock);
 
-        Unloader* getUnloader() const { return _unloader; }
+        Merger* getMerger() const { return _merger; }
 
         const RenderBindings& getRenderBindings() const { return _renderBindings; }
 
@@ -75,31 +68,25 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
         osg::ref_ptr<const Map> getMap() const;
 
         // only call this variant when it's safe to do so (update, cull).
-        TerrainEngineNode* getEngine() const { return _terrainEngine.get(); }
+        osg::ref_ptr<TerrainEngineNode> getEngine() { return osg::ref_ptr<TerrainEngineNode>(_terrainEngine); }
 
-        TileNodeRegistry* liveTiles() const { return _liveTiles; }
+        TileNodeRegistry::Ptr tiles() const { return _tiles; }
 
         const SelectionInfo& getSelectionInfo() const { return _selectionInfo; }
 
-        const RexTerrainEngineOptions& getOptions() const { return _options; }
+        const TerrainOptionsAPI& options() const { return _options; }
 
         ProgressCallback* progress() const { return _progress.get(); }
 
-        void startCull(osgUtil::CullVisitor* cv);
-
-        void endCull(osgUtil::CullVisitor* cv);
-
-        double getElapsedCullTime() const;
-
-        bool maxLiveTilesExceeded() const;
-
         double getExpirationRange2() const { return _expirationRange2; }
 
-        ModifyBoundingBoxCallback* getModifyBBoxCallback() const { return _bboxCB; }
+        ModifyBoundingBoxCallback* getModifyBBoxCallback() const { return _bboxCB.get(); }
 
         bool getUseTextureBorder() const { return false; }
 
-        TileRasterizer* getTileRasterizer() const { return _tileRasterizer; }
+        const FrameClock* getClock() const { return _clock; }
+
+        TextureArena* textures() const { return _textures.get(); }
 
     protected:
 
@@ -109,22 +96,21 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
         
         osg::observer_ptr<TerrainEngineNode>  _terrainEngine;
         osg::observer_ptr<const Map>          _map;
-        int                                   _mainThreadId;
-        TileNodeRegistry*                     _liveTiles;
-        const RexTerrainEngineOptions&        _options;
+        TileNodeRegistry::Ptr                 _tiles;
+        TerrainOptionsAPI                     _options;
         const RenderBindings&                 _renderBindings;
         GeometryPool*                         _geometryPool;
-        Loader*                               _loader;
-        Unloader*                             _unloader;
-        TileRasterizer*                       _tileRasterizer;
+        Merger*                               _merger;
         const SelectionInfo&                  _selectionInfo;
         osg::Timer_t                          _tick;
         int                                   _tilesLastCull;
         osg::ref_ptr<ProgressCallback>        _progress;    
         double                                _expirationRange2;
-        ModifyBoundingBoxCallback*            _bboxCB;
+        osg::ref_ptr<ModifyBoundingBoxCallback> _bboxCB;
+        const FrameClock*                     _clock;
+        osg::ref_ptr<TextureArena>            _textures;
     };
 
-} } } // namespace osgEarth::Drivers::RexTerrainEngine
+} } // namespace osgEarth::Drivers::RexTerrainEngine
 
 #endif // OSGEARTH_DRIVERS_REX_TILE_GROUP_FACTORY

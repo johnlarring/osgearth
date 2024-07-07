@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -20,8 +20,11 @@
 * along with this program.  If not, see <http://www.gnu.org/licenses/>
 */
 
-#include <osgEarth/ObjectIndex>
-#include <osgEarth/Registry>
+#include "ObjectIndex"
+#include "Capabilities"
+#include "StringUtils"
+#include "VirtualProgram"
+
 #include <osg/Geometry>
 
 using namespace osgEarth;
@@ -36,38 +39,37 @@ using namespace osgEarth;
 
 namespace
 {
-    const char* indexVertexInit =
-        "#version " GLSL_VERSION_STR "\n"
-        GLSL_DEFAULT_PRECISION_FLOAT "\n"
+    const char* indexVertexInit = R"(
+        #pragma vp_function oe_index_readObjectID, vertex_model, first
 
-        "#pragma vp_entryPoint oe_index_readObjectID \n"
-        "#pragma vp_location   vertex_model \n"
-        "#pragma vp_order      first \n"
+        uniform uint oe_index_objectid_uniform; // override objectid if > 0
+        in uint      oe_index_objectid_attr;    // Vertex attribute containing the object ID.
+        uint         oe_index_objectid;         // Stage global containing the Object ID.
 
-        "uniform uint oe_index_objectid_uniform; \n"   // override objectid if > 0
-        "in uint      oe_index_objectid_attr; \n"      // Vertex attribute containing the object ID.
-        "uint         oe_index_objectid; \n"           // Stage global containing the Object ID.
-
-        "void oe_index_readObjectID(inout vec4 vertex) \n"
-        "{ \n"
-        "    if ( oe_index_objectid_uniform > 0u ) \n"
-        "        oe_index_objectid = oe_index_objectid_uniform; \n"
-        "    else if ( oe_index_objectid_attr > 0u ) \n"
-        "        oe_index_objectid = oe_index_objectid_attr; \n"
-        "    else \n"
-        "        oe_index_objectid = 0u; \n"
-        "} \n";
+        void oe_index_readObjectID(inout vec4 vertex)
+        {
+            if ( oe_index_objectid_uniform > 0u )
+                oe_index_objectid = oe_index_objectid_uniform;
+            else if ( oe_index_objectid_attr > 0u )
+                oe_index_objectid = oe_index_objectid_attr;
+            else
+                oe_index_objectid = 0u;
+        }
+)";
 }
 
 ObjectIndex::ObjectIndex() :
-_idGen( STARTING_OBJECT_ID )
+    _idGen(STARTING_OBJECT_ID)
 {
     _attribName     = "oe_index_objectid_attr";
     _attribLocation = osg::Drawable::SECONDARY_COLORS;
     _oidUniformName = "oe_index_objectid_uniform";
 
     // set up the shader package.
-    _shaders.add( "ObjectIndex.vert.glsl", indexVertexInit );
+    std::string source = Stringify()
+        << "#version " << std::to_string(Capabilities::get().getGLSLVersionInt()) << "\n"
+        << indexVertexInit;
+    _shaders.add("ObjectIndex.vert.glsl", source);
 }
 
 bool
@@ -97,7 +99,7 @@ ObjectIndex::setObjectIDAtrribLocation(int value)
 ObjectID
 ObjectIndex::insert(osg::Referenced* object)
 {
-    Threading::ScopedMutexLock excl( _mutex );
+    std::lock_guard<std::mutex> excl( _mutex );
     return insertImpl( object );
 }
 
@@ -122,7 +124,7 @@ ObjectIndex::getImpl(ObjectID id) const
 void
 ObjectIndex::remove(ObjectID id)
 {
-    Threading::ScopedMutexLock excl(_mutex);
+    std::lock_guard<std::mutex> excl(_mutex);
     removeImpl(id);
 }
 
@@ -138,7 +140,7 @@ ObjectIndex::removeImpl(ObjectID id)
 ObjectID
 ObjectIndex::tagDrawable(osg::Drawable* drawable, osg::Referenced* object)
 {
-    Threading::ScopedMutexLock lock(_mutex);
+    std::lock_guard<std::mutex> lock(_mutex);
     ObjectID oid = insertImpl(object);
     tagDrawable(drawable, oid);
     return oid;
@@ -161,10 +163,53 @@ ObjectIndex::tagDrawable(osg::Drawable* drawable, ObjectID id) const
     geom->setVertexAttribArray(_attribLocation, ids);
     ids->setPreserveDataType(true);
 
-    // The tag is actually FeatureID + 1, to preserve "0" as an "empty" value.
-    // TODO: use a ObjectID generator and mapping instead.
     ids->assign( geom->getVertexArray()->getNumElements(), id );
 }
+
+ObjectID
+ObjectIndex::tagRange(osg::Drawable* drawable, osg::Referenced* object, unsigned int start, unsigned int count)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    ObjectID oid = insertImpl(object);
+    tagRange(drawable, oid, start, count);
+    return oid;
+}
+
+void
+ObjectIndex::tagRange(osg::Drawable* drawable, ObjectID id, unsigned int start, unsigned int count) const
+{
+    if (drawable == 0L)
+        return;
+
+    osg::Geometry* geom = drawable->asGeometry();
+    if (!geom)
+        return;
+
+    ObjectIDArray* ids = dynamic_cast<ObjectIDArray*>(geom->getVertexAttribArray(_attribLocation));
+    if (!ids)
+    {
+        // add a new integer attributer to store the feautre ID per vertex.
+        ids = new ObjectIDArray();
+        ids->setBinding(osg::Array::BIND_PER_VERTEX);
+        ids->setNormalize(false);
+        geom->setVertexAttribArray(_attribLocation, ids);
+        ids->setPreserveDataType(true);
+    }
+
+    if (ids->size() < start + count)
+    {
+        ids->resize(start + count);
+    }
+
+    for (unsigned int i = 0; i < count; ++i)
+    {
+        (*ids)[start + i] = id;
+    }
+    
+    ids->dirty();
+}
+
+
 
 namespace
 {
@@ -190,7 +235,7 @@ namespace
 ObjectID
 ObjectIndex::tagAllDrawables(osg::Node* node, osg::Referenced* object)
 {
-    Threading::ScopedMutexLock lock(_mutex);
+    std::lock_guard<std::mutex> lock(_mutex);
     ObjectID oid = insertImpl(object);
     tagAllDrawables(node, oid);
     return oid;
@@ -209,7 +254,7 @@ ObjectIndex::tagAllDrawables(osg::Node* node, ObjectID id) const
 ObjectID
 ObjectIndex::tagNode(osg::Node* node, osg::Referenced* object)
 {
-    Threading::ScopedMutexLock lock(_mutex);
+    std::lock_guard<std::mutex> lock(_mutex);
     ObjectID oid = insertImpl(object);
     tagNode(node, oid);
     return oid;
@@ -260,7 +305,7 @@ ObjectIndex::getObjectID(osg::Node* node, ObjectID& output) const
 
 bool
 ObjectIndex::updateObjectIDs(osg::Drawable* drawable,
-                             std::map<ObjectID, ObjectID>& oldNewMap,
+                             std::unordered_map<ObjectID, ObjectID>& oldNewMap,
                              osg::Referenced* object)
 {
     // in a drawable, replaces each OIDs in map.first with the corresponding OID in map.second
@@ -276,7 +321,7 @@ ObjectIndex::updateObjectIDs(osg::Drawable* drawable,
     for (ObjectIDArray::iterator i = oids->begin(); i != oids->end(); ++i)
     {
         ObjectID newoid;
-        std::map<ObjectID, ObjectID>::iterator k = oldNewMap.find(*i);
+        std::unordered_map<ObjectID, ObjectID>::iterator k = oldNewMap.find(*i);
         if (k != oldNewMap.end()) {
             newoid = k->second;
         }
@@ -294,7 +339,7 @@ ObjectIndex::updateObjectIDs(osg::Drawable* drawable,
 
 bool
 ObjectIndex::updateObjectID(osg::Node* node,
-                            std::map<ObjectID, ObjectID>& oldNewMap,
+                            std::unordered_map<ObjectID, ObjectID>& oldNewMap,
                             osg::Referenced* object)
 {
     if (!node) return false;
@@ -309,7 +354,7 @@ ObjectIndex::updateObjectID(osg::Node* node,
     uniform->get(oldoid);
 
     ObjectID newoid;
-    std::map<ObjectID, ObjectID>::iterator k = oldNewMap.find(oldoid);
+    std::unordered_map<ObjectID, ObjectID>::iterator k = oldNewMap.find(oldoid);
     if (k != oldNewMap.end()) {
         newoid = k->second;
     }

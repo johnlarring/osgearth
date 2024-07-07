@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -22,29 +22,30 @@
 
 #include <osgEarth/MapNode>
 
-#include <osgEarthUtil/EarthManipulator>
-#include <osgEarthUtil/ExampleResources>
+#include <osgEarth/EarthManipulator>
+#include <osgEarth/ExampleResources>
 
-#include <osgEarthAnnotation/ImageOverlay>
-#include <osgEarthAnnotation/CircleNode>
-#include <osgEarthAnnotation/RectangleNode>
-#include <osgEarthAnnotation/EllipseNode>
-#include <osgEarthAnnotation/PlaceNode>
-#include <osgEarthAnnotation/LabelNode>
-#include <osgEarthAnnotation/LocalGeometryNode>
-#include <osgEarthAnnotation/FeatureNode>
-#include <osgEarthAnnotation/ModelNode>
+#include <osgEarth/ImageOverlay>
+#include <osgEarth/CircleNode>
+#include <osgEarth/RectangleNode>
+#include <osgEarth/EllipseNode>
+#include <osgEarth/PlaceNode>
+#include <osgEarth/LabelNode>
+#include <osgEarth/LocalGeometryNode>
+#include <osgEarth/FeatureNode>
+#include <osgEarth/ModelNode>
+#include <osgEarth/TrackNode>
 
-#include <osgEarthAnnotation/AnnotationEditing>
-#include <osgEarthAnnotation/ImageOverlayEditor>
+#include <osgEarth/ImageOverlayEditor>
 
-#include <osgEarthSymbology/GeometryFactory>
+#include <osgEarth/GeometryFactory>
 
 #include <osgViewer/Viewer>
+#include <osgDB/ReadFile>
 
 using namespace osgEarth;
-using namespace osgEarth::Annotation;
-using namespace osgEarth::Features;
+using namespace osgEarth::Util;
+using namespace osgEarth::Contrib;
 using namespace osgEarth::Util;
 
 //------------------------------------------------------------------
@@ -61,6 +62,8 @@ usage( char** argv )
 int
 main(int argc, char** argv)
 {
+    osgEarth::initialize();
+
     osg::Group* root = new osg::Group();
 
     // try to load an earth file.
@@ -70,14 +73,14 @@ main(int argc, char** argv)
     viewer.setCameraManipulator( new EarthManipulator() );
 
     // load an earth file and parse demo arguments
-    osg::Node* node = MapNodeHelper().load(arguments, &viewer);
+    auto node = MapNodeHelper().load(arguments, &viewer);
     if ( !node )
         return usage(argv);
 
     root->addChild( node );
 
     // find the map node that we loaded.
-    MapNode* mapNode = MapNode::findMapNode(node);
+    MapNode* mapNode = MapNode::get(node);
     if ( !mapNode )
         return usage(argv);
 
@@ -95,7 +98,7 @@ main(int argc, char** argv)
     // Style our labels:
     Style labelStyle;
     labelStyle.getOrCreate<TextSymbol>()->alignment() = TextSymbol::ALIGN_CENTER_CENTER;
-    labelStyle.getOrCreate<TextSymbol>()->fill()->color() = Color::Yellow;
+    labelStyle.getOrCreate<TextSymbol>()->fill().mutable_value().color() = Color::Yellow;
 
     // A lat/long SRS for specifying points.
     const SpatialReference* geoSRS = mapNode->getMapSRS()->getGeographicSRS();
@@ -105,7 +108,7 @@ main(int argc, char** argv)
     // A series of place nodes (an icon with a text label)
     {
         Style pm;
-        pm.getOrCreate<IconSymbol>()->url()->setLiteral( "../data/placemark32.png" );
+        pm.getOrCreate<IconSymbol>()->url().mutable_value().setLiteral( "../data/placemark32.png" );
         pm.getOrCreate<IconSymbol>()->declutter() = true;
         pm.getOrCreate<TextSymbol>()->halo() = Color("#5f5f5f");
 
@@ -152,12 +155,11 @@ main(int argc, char** argv)
         feature->geoInterp() = GEOINTERP_RHUMB_LINE;
 
         Style geomStyle;
-        geomStyle.getOrCreate<LineSymbol>()->stroke()->color() = Color::Cyan;
-        geomStyle.getOrCreate<LineSymbol>()->stroke()->width() = 5.0f;
-        geomStyle.getOrCreate<LineSymbol>()->tessellationSize() = 75000;
-        geomStyle.getOrCreate<AltitudeSymbol>()->clamping() = AltitudeSymbol::CLAMP_TO_TERRAIN;
-        geomStyle.getOrCreate<AltitudeSymbol>()->technique() = AltitudeSymbol::TECHNIQUE_GPU;
-        
+        geomStyle.getOrCreate<LineSymbol>()->stroke().mutable_value().color() = Color::Cyan;
+        geomStyle.getOrCreate<LineSymbol>()->stroke().mutable_value().width() = 5.0f;
+        geomStyle.getOrCreate<LineSymbol>()->tessellationSize() = Distance(75000, Units::METERS);
+        geomStyle.getOrCreate<RenderSymbol>()->depthOffset().mutable_value().enabled() = true;
+
         FeatureNode* fnode = new FeatureNode(feature, geomStyle);
 
         fnode->addCullCallback(new C());
@@ -183,11 +185,10 @@ main(int argc, char** argv)
         Feature* feature = new Feature(geom, geoSRS);
         feature->geoInterp() = GEOINTERP_RHUMB_LINE;
 
-        geomStyle.getOrCreate<LineSymbol>()->stroke()->color() = Color::Lime;
-        geomStyle.getOrCreate<LineSymbol>()->stroke()->width() = 3.0f;
-        geomStyle.getOrCreate<LineSymbol>()->tessellationSize() = 75000;
-        geomStyle.getOrCreate<AltitudeSymbol>()->clamping() = AltitudeSymbol::CLAMP_TO_TERRAIN;
-        geomStyle.getOrCreate<AltitudeSymbol>()->technique() = AltitudeSymbol::TECHNIQUE_GPU;
+        geomStyle.getOrCreate<LineSymbol>()->stroke().mutable_value().color() = Color::Lime;
+        geomStyle.getOrCreate<LineSymbol>()->stroke().mutable_value().width() = 3.0f;
+        geomStyle.getOrCreate<LineSymbol>()->tessellationSize() = Distance(75000, Units::METERS);
+        geomStyle.getOrCreate<RenderSymbol>()->depthOffset().mutable_value().enabled() = true;
 
         FeatureNode* gnode = new FeatureNode(feature, geomStyle);
         annoGroup->addChild( gnode );
@@ -213,16 +214,18 @@ main(int argc, char** argv)
         pathFeature->geoInterp() = GEOINTERP_GREAT_CIRCLE;
 
         Style pathStyle;
-        pathStyle.getOrCreate<LineSymbol>()->stroke()->color() = Color::White;
-        pathStyle.getOrCreate<LineSymbol>()->stroke()->width() = 1.0f;
-        pathStyle.getOrCreate<LineSymbol>()->stroke()->smooth() = true;
-        pathStyle.getOrCreate<LineSymbol>()->tessellationSize() = 75000;
+        auto* line = pathStyle.getOrCreate<LineSymbol>();
+        auto& stroke = line->stroke().mutable_value();
+        stroke.color() = Color::White;
+        stroke.width() = 1.0f;
+        stroke.smooth() = true;
+        line->tessellationSize() = Distance(75000, Units::METERS);
         pathStyle.getOrCreate<PointSymbol>()->size() = 8;
-        pathStyle.getOrCreate<PointSymbol>()->fill()->color() = Color::Red;
+        pathStyle.getOrCreate<PointSymbol>()->fill().mutable_value().color() = Color::Red;
         pathStyle.getOrCreate<PointSymbol>()->smooth() = true;
         pathStyle.getOrCreate<AltitudeSymbol>()->clamping() = AltitudeSymbol::CLAMP_TO_TERRAIN;
         pathStyle.getOrCreate<AltitudeSymbol>()->technique() = AltitudeSymbol::TECHNIQUE_GPU;
-        pathStyle.getOrCreate<RenderSymbol>()->depthOffset()->enabled() = true;
+        pathStyle.getOrCreate<RenderSymbol>()->depthOffset().mutable_value().enabled() = true;
 
         //OE_INFO << "Path extent = " << pathFeature->getExtent().toString() << std::endl;
 
@@ -239,7 +242,7 @@ main(int argc, char** argv)
     // Two circle segments around New Orleans.
     {
         Style circleStyle;
-        circleStyle.getOrCreate<PolygonSymbol>()->fill()->color() = Color(Color::Cyan, 0.5);
+        circleStyle.getOrCreate<PolygonSymbol>()->fill().mutable_value().color() = Color(Color::Cyan, 0.5);
         circleStyle.getOrCreate<AltitudeSymbol>()->clamping() = AltitudeSymbol::CLAMP_TO_TERRAIN;
         circleStyle.getOrCreate<AltitudeSymbol>()->technique() = AltitudeSymbol::TECHNIQUE_DRAPE;
 
@@ -247,19 +250,17 @@ main(int argc, char** argv)
         circle->set(
             GeoPoint(geoSRS, -90.25, 29.98, 1000., ALTMODE_RELATIVE),
             Distance(300, Units::KILOMETERS),
-            circleStyle, 
+            circleStyle,
             Angle(-45.0, Units::DEGREES),
             Angle(45.0, Units::DEGREES),
             true);
 
         annoGroup->addChild( circle );
-
-        editGroup->addChild( new CircleNodeEditor(circle) );
     }
 
 	{
 		Style circleStyle;
-		circleStyle.getOrCreate<PolygonSymbol>()->fill()->color() = Color(Color::Red, 0.5);
+		circleStyle.getOrCreate<PolygonSymbol>()->fill().mutable_value().color() = Color(Color::Red, 0.5);
 		circleStyle.getOrCreate<AltitudeSymbol>()->clamping() = AltitudeSymbol::CLAMP_TO_TERRAIN;
 		circleStyle.getOrCreate<AltitudeSymbol>()->technique() = AltitudeSymbol::TECHNIQUE_DRAPE;
 
@@ -273,8 +274,6 @@ main(int argc, char** argv)
             true);
 
 		annoGroup->addChild( circle );
-
-        editGroup->addChild( new CircleNodeEditor(circle) );
 	}
 
     //--------------------------------------------------------------------
@@ -282,7 +281,7 @@ main(int argc, char** argv)
     // An extruded ellipse around Miami.
     {
         Style ellipseStyle;
-        ellipseStyle.getOrCreate<PolygonSymbol>()->fill()->color() = Color(Color::Orange, 0.75);
+        ellipseStyle.getOrCreate<PolygonSymbol>()->fill().mutable_value().color() = Color(Color::Orange, 0.75);
         ellipseStyle.getOrCreate<ExtrusionSymbol>()->height() = 250000.0; // meters MSL
         EllipseNode* ellipse = new EllipseNode();
         ellipse->set(
@@ -292,15 +291,13 @@ main(int argc, char** argv)
             Angle   (0, Units::DEGREES),
             ellipseStyle,
             Angle(45.0, Units::DEGREES),
-            Angle(360.0 - 45.0, Units::DEGREES), 
+            Angle(360.0 - 45.0, Units::DEGREES),
             true);
         annoGroup->addChild( ellipse );
-
-        editGroup->addChild( new EllipseNodeEditor(ellipse) );
     }
 	{
 		Style ellipseStyle;
-		ellipseStyle.getOrCreate<PolygonSymbol>()->fill()->color() = Color(Color::Blue, 0.75);
+		ellipseStyle.getOrCreate<PolygonSymbol>()->fill().mutable_value().color() = Color(Color::Blue, 0.75);
 		ellipseStyle.getOrCreate<ExtrusionSymbol>()->height() = 250000.0; // meters MSL
 		EllipseNode* ellipse = new EllipseNode();
         ellipse->set(
@@ -308,21 +305,19 @@ main(int argc, char** argv)
 			Distance(250, Units::MILES),
 			Distance(100, Units::MILES),
 			Angle   (0, Units::DEGREES),
-			ellipseStyle, 
-            Angle(-40.0, Units::DEGREES), 
-            Angle(40.0, Units::DEGREES), 
+			ellipseStyle,
+            Angle(-40.0, Units::DEGREES),
+            Angle(40.0, Units::DEGREES),
             true);
 		annoGroup->addChild( ellipse );
-
-        editGroup->addChild( new EllipseNodeEditor(ellipse) );
 	}
-    
+
     //--------------------------------------------------------------------
 
     {
         // A rectangle around San Diego
         Style rectStyle;
-        rectStyle.getOrCreate<PolygonSymbol>()->fill()->color() = Color(Color::Green, 0.5);
+        rectStyle.getOrCreate<PolygonSymbol>()->fill().mutable_value().color() = Color(Color::Green, 0.5);
         rectStyle.getOrCreate<AltitudeSymbol>()->clamping() = AltitudeSymbol::CLAMP_TO_TERRAIN;
         rectStyle.getOrCreate<AltitudeSymbol>()->technique() = AltitudeSymbol::TECHNIQUE_DRAPE;
         RectangleNode* rect = new RectangleNode(
@@ -331,9 +326,7 @@ main(int argc, char** argv)
             Distance(600, Units::KILOMETERS ),
             rectStyle);
         annoGroup->addChild( rect );
-
-        editGroup->addChild( new RectangleNodeEditor(rect) );
-    }    
+    }
 
     //--------------------------------------------------------------------
 
@@ -351,7 +344,7 @@ main(int argc, char** argv)
 
         Style utahStyle;
         utahStyle.getOrCreate<ExtrusionSymbol>()->height() = 250000.0; // meters MSL
-        utahStyle.getOrCreate<PolygonSymbol>()->fill()->color() = Color(Color::White, 0.8);
+        utahStyle.getOrCreate<PolygonSymbol>()->fill().mutable_value().color() = Color(Color::White, 0.8);
 
         Feature*     utahFeature = new Feature(utah, geoSRS);
         FeatureNode* featureNode = new FeatureNode(utahFeature, utahStyle);
@@ -368,7 +361,7 @@ main(int argc, char** argv)
         if (image.valid())
         {
             imageOverlay = new ImageOverlay(mapNode, image.get());
-            imageOverlay->setBounds( Bounds( -100.0, 35.0, -90.0, 40.0) );
+            imageOverlay->setBounds(Bounds(-100.0, 35.0, 0.0, -90.0, 40.0, 0.0));
             annoGroup->addChild( imageOverlay );
 
             editGroup->addChild( new ImageOverlayEditor(imageOverlay) );
@@ -381,16 +374,40 @@ main(int argc, char** argv)
     {
         Style style;
         style.getOrCreate<ModelSymbol>()->autoScale() = true;
-        style.getOrCreate<ModelSymbol>()->url()->setLiteral("../data/red_flag.osg.50.scale");
-        ModelNode* modelNode = new ModelNode(mapNode, style); 
+        style.getOrCreate<ModelSymbol>()->url().mutable_value().setLiteral("../data/red_flag.osg.50.scale");
+        ModelNode* modelNode = new ModelNode(mapNode, style);
         modelNode->setPosition(GeoPoint(geoSRS, -100, 52));
         annoGroup->addChild(modelNode);
     }
 
     //--------------------------------------------------------------------
 
-    // initialize the viewer:    
-    viewer.setSceneData( root );    
-    viewer.getCamera()->setSmallFeatureCullingPixelSize(-1.0f);
+    // a track node
+    {
+
+        // A TrackNode
+        auto trackImage = osgDB::readRefImageFile("../data/icon.png");
+        if (trackImage.valid())
+        {
+            GeoPoint trackPos(SpatialReference::get("wgs84"), -55, 22, 0, ALTMODE_ABSOLUTE);
+            auto nameSymbol = new TextSymbol();
+            nameSymbol->pixelOffset() = osg::Vec2s(0, -trackImage->t() / 3);
+            nameSymbol->alignment() = TextSymbol::ALIGN_CENTER_BOTTOM;
+            nameSymbol->halo() = Color::Black;
+            nameSymbol->content() = { "Hello, TrackNode" };
+            nameSymbol->size() = 18.0f;
+            TrackNodeFieldSchema trackSchema;
+            trackSchema["name"] = { nameSymbol, true };
+            auto track = new TrackNode(trackPos, trackImage.get(), trackSchema);
+
+            track->setIconRotation(Angle(45.0, Units::DEGREES));
+            annoGroup->addChild(track);
+        }
+    }
+
+    //--------------------------------------------------------------------
+
+    // initialize the viewer:
+    viewer.setSceneData( root );
     return viewer.run();
 }

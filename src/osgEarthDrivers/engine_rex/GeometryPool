@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2014 Pelican Mapping
 * http://osgearth.org
 *
@@ -20,103 +20,262 @@
 #define OSGEARTH_DRIVERS_REX_TERRAIN_ENGINE_GEOMETRY_POOL 1
 
 #include "Common"
-#include "MaskGenerator"
-#include "RexTerrainEngineOptions"
-#include <osgEarth/MapInfo>
+#include "TileRenderModel"
+#include <osgEarth/TerrainOptions>
 #include <osgEarth/TileKey>
-#include <osgEarth/ThreadingUtils>
-#include <osgEarth/ResourceReleaser>
+#include <osgEarth/Threading>
+#include <osgEarth/PatchLayer>
+#include <osgEarth/Metrics>
+#include <osgEarth/Math>
+#include <osgEarth/TileMesher>
 #include <osg/Geometry>
 
-#if OSG_MIN_VERSION_REQUIRED(3,5,9)
-#define SUPPORTS_VAO 1
-#endif
-
-namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
+namespace osgEarth
 {
-    using namespace osgEarth;
-
-    // Adapted from osgTerrain shared geometry class.
-    class /*internal*/ SharedGeometry : public osg::Drawable
+    namespace REX
     {
-    public:
-        SharedGeometry();
+        using namespace osgEarth;
 
-        SharedGeometry(const SharedGeometry&, const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
+        using DrawElementsBase = osg::DrawElementsUShort;
+        //using DrawElementsBase = osg::DrawElementsUInt;
 
-        META_Node(osgEarthRex, SharedGeometry);
+        // A DrawElements with a UID.
+        class /* internal */ SharedDrawElements : public DrawElementsBase
+        {
+        public:
+            SharedDrawElements(GLenum type) :
+                DrawElementsBase(type)
+            {
+                //nop
+            }
 
-        void setVertexArray(osg::Array* array) { _vertexArray = array; }
-        osg::Array* getVertexArray() { return _vertexArray.get(); }
-        const osg::Array* getVertexArray() const  { return _vertexArray.get(); }
+            ~SharedDrawElements()
+            {
+                releaseGLObjects(nullptr);
+            }
 
-        void setNormalArray(osg::Array* array) { _normalArray = array; }
-        osg::Array* getNormalArray() { return _normalArray.get(); }
-        const osg::Array* getNormalArray() const { return _normalArray.get(); }
+            void releaseGLObjects(osg::State* state) const override
+            {
+                DrawElementsBase::releaseGLObjects(state);
+                if (state)
+                {
+                    GLObjects::get(_globjects, *state)._ebo = nullptr;
+                }
+                // Do nothing if state is nullptr!
+                // Let nature take its course and let the GLObjectPool release it
+            }
 
-        void setTexCoordArray(osg::Array* array) { _texcoordArray = array; }
-        osg::Array* getTexCoordArray() { return _texcoordArray.get(); }
-        const osg::Array* getTexCoordArray() const { return _texcoordArray.get(); }
+            void resizeGLObjectBuffers(unsigned size) override
+            {
+                DrawElementsBase::resizeGLObjectBuffers(size);
+                if (size > _globjects.size())
+                    _globjects.resize(size);
+            }
 
-        void setNeighborArray(osg::Array* array) { _neighborArray = array; }
-        osg::Array* getNeighborArray() { return _neighborArray.get(); }
-        const osg::Array* getNeighborArray() const { return _neighborArray.get(); }
+            // Shareable because they are static and bindless
+            struct GLObjects : public BindlessShareableGLObjects
+            {
+                GLBuffer::Ptr _ebo; // bindless buffer
+            };
+            mutable osg::buffered_object<GLObjects> _globjects;
+        };
 
-        void setDrawElements(osg::DrawElements* array) { _drawElements = array; }
-        osg::DrawElements* getDrawElements() { return _drawElements.get(); }
-        const osg::DrawElements* getDrawElements() const { return _drawElements.get(); }
+        // Adapted from osgTerrain shared geometry class.
+        class /*internal*/ SharedGeometry : public osg::Drawable
+        {
+        public:
+            SharedGeometry();
 
-        void setMaskElements(osg::DrawElements* array) { _maskElements = array; }
-        osg::DrawElements* getMaskElements() { return _maskElements.get(); }
-        const osg::DrawElements* getMaskElements() const { return _maskElements.get(); }
+            SharedGeometry(const SharedGeometry&, const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
 
-        // convert to a "real" geometry object
-        osg::Geometry* makeOsgGeometry();
+            META_Node(osgEarthRex, SharedGeometry);
 
-        // whether this geometry contains anything
-        bool empty() const;
+            void setVertexArray(osg::Vec3Array* array) { _vertexArray = array; }
+            osg::Vec3Array* getVertexArray() { return _vertexArray.get(); }
+            const osg::Vec3Array* getVertexArray() const { return _vertexArray.get(); }
 
-    public: // osg::Drawable
+            void setNormalArray(osg::Vec3Array* array) { _normalArray = array; }
+            osg::Vec3Array* getNormalArray() { return _normalArray.get(); }
+            const osg::Vec3Array* getNormalArray() const { return _normalArray.get(); }
 
-#ifdef SUPPORTS_VAO
-        osg::VertexArrayState* createVertexArrayStateImplementation(osg::RenderInfo& renderInfo) const;
-#endif
+            void setTexCoordArray(osg::Vec3Array* array) { _texcoordArray = array; }
+            osg::Vec3Array* getTexCoordArray() { return _texcoordArray.get(); }
+            const osg::Vec3Array* getTexCoordArray() const { return _texcoordArray.get(); }
 
-        void drawImplementation(osg::RenderInfo& renderInfo) const;
+            void setNeighborArray(osg::Vec3Array* array) { _neighborArray = array; }
+            osg::Vec3Array* getNeighborArray() { return _neighborArray.get(); }
+            const osg::Vec3Array* getNeighborArray() const { return _neighborArray.get(); }
 
-        void resizeGLObjectBuffers(unsigned int maxSize);
-        void releaseGLObjects(osg::State* state) const;
-        
-        bool supports(const osg::Drawable::AttributeFunctor&) const { return true; }
-        void accept(osg::Drawable::AttributeFunctor&);
+            void setNeighborNormalArray(osg::Vec3Array* array) { _neighborNormalArray = array; }
+            osg::Vec3Array* getNeighborNormalArray() { return _neighborNormalArray.get(); }
+            const osg::Vec3Array* getNeighborNormalArray() const { return _neighborNormalArray.get(); }
 
-        bool supports(const osg::Drawable::ConstAttributeFunctor&) const { return true; }
-        void accept(osg::Drawable::ConstAttributeFunctor&) const;
+            void setDrawElements(SharedDrawElements* array) { _drawElements = array; }
+            SharedDrawElements* getDrawElements() { return _drawElements.get(); }
+            const SharedDrawElements* getDrawElements() const { return _drawElements.get(); }
 
-        bool supports(const osg::PrimitiveFunctor&) const { return true; }
-        void accept(osg::PrimitiveFunctor&) const;
+            //! Does this geometry include custom constraints?
+            void setHasConstraints(bool value) { _hasConstraints = value; }
+            bool hasConstraints() const { return _hasConstraints; }
 
-        bool supports(const osg::PrimitiveIndexFunctor&) const { return true; }
-        void accept(osg::PrimitiveIndexFunctor&) const;
+            // convert to a "real" geometry object
+            osg::Geometry* makeOsgGeometry();
 
-    protected:
+            // whether this geometry contains anything
+            bool empty() const;
 
-        virtual ~SharedGeometry();
+        public: // osg::Drawable
 
-        osg::ref_ptr<osg::Array>        _vertexArray;
-        osg::ref_ptr<osg::Array>        _normalArray;
-        osg::ref_ptr<osg::Array>        _colorArray;
-        osg::ref_ptr<osg::Array>        _texcoordArray;
-        osg::ref_ptr<osg::Array>        _neighborArray;
-        osg::ref_ptr<osg::DrawElements> _drawElements;
-        osg::ref_ptr<osg::DrawElements> _maskElements;
+            osg::VertexArrayState* createVertexArrayStateImplementation(osg::RenderInfo& renderInfo) const override;
 
-    private:
+            void drawVertexArraysImplementation(osg::RenderInfo& renderInfo) const;
 
-        friend struct DrawTileCommand;
-        mutable osg::buffered_object<GLenum> _ptype;
+            void drawPrimitivesImplementation(osg::RenderInfo& renderInfo) const;
+
+            void drawImplementation(osg::RenderInfo& renderInfo) const override;
+
+            void resizeGLObjectBuffers(unsigned int maxSize) override;
+
+            void releaseGLObjects(osg::State* state) const override;
+
+            bool supports(const osg::Drawable::AttributeFunctor&) const { return true; }
+            void accept(osg::Drawable::AttributeFunctor&);
+
+            bool supports(const osg::Drawable::ConstAttributeFunctor&) const { return true; }
+            void accept(osg::Drawable::ConstAttributeFunctor&) const;
+
+            bool supports(const osg::PrimitiveFunctor&) const { return true; }
+            void accept(osg::PrimitiveFunctor&) const;
+
+            bool supports(const osg::PrimitiveIndexFunctor&) const { return true; }
+            void accept(osg::PrimitiveIndexFunctor&) const;
+
+            const osg::BoundingBox& getBoundingBox() const { return osg::Drawable::getBoundingBox(); }
+
+            const DrawElementsIndirectBindlessCommandNV& getOrCreateNVGLCommand(
+                osg::State& state);
+
+        //protected:
+
+            virtual ~SharedGeometry();
+
+            osg::ref_ptr<osg::Vec3Array> _vertexArray;
+            osg::ref_ptr<osg::Vec3Array> _normalArray;
+            osg::ref_ptr<osg::Vec4Array> _colorArray;
+            osg::ref_ptr<osg::Vec3Array> _texcoordArray;
+            osg::ref_ptr<osg::Vec3Array> _neighborArray;
+            osg::ref_ptr<osg::Vec3Array> _neighborNormalArray;
+            osg::ref_ptr<SharedDrawElements> _drawElements;
+            bool _hasConstraints;
+
+
+            std::vector<GL4Vertex> _verts;
+
+            // Shareable because they are static and bindless
+            struct GLObjects : public BindlessShareableGLObjects
+            {
+                DrawElementsIndirectBindlessCommandNV _command;
+                GLBuffer::Ptr _vbo;
+            };
+            mutable osg::buffered_object<GLObjects> _globjects;
+
+        //private:
+
+            friend struct DrawTileCommand;
+            friend class GeometryPool;
+            mutable osg::buffered_object<GLenum> _ptype;
+        };
+
+
+        /**
+        * Hashtable key for unique (and therefore shareable) geometries.
+        */
+        struct GeometryKey
+        {
+            GeometryKey() :
+                lod(-1),
+                tileY(0),
+                patch(false),
+                size(0u)
+            {
+                //nop
+            }
+
+            GeometryKey(const GeometryKey& rhs) :
+                lod(rhs.lod),
+                tileY(rhs.tileY),
+                patch(rhs.patch),
+                size(rhs.size)
+            {
+                //nop
+            }
+
+            bool operator < (const GeometryKey& rhs) const
+            {
+                if (lod < rhs.lod) return true;
+                if (lod > rhs.lod) return false;
+                if (tileY < rhs.tileY) return true;
+                if (tileY > rhs.tileY) return false;
+                if (size < rhs.size) return true;
+                if (size > rhs.size) return false;
+                if (patch == false && rhs.patch == true) return true;
+                return false;
+            }
+
+            bool operator == (const GeometryKey& rhs) const
+            {
+                return
+                    lod == rhs.lod &&
+                    tileY == rhs.tileY &&
+                    size == rhs.size &&
+                    patch == rhs.patch;
+            }
+
+            bool operator != (const GeometryKey& rhs) const
+            {
+                return
+                    lod != rhs.lod ||
+                    tileY != rhs.tileY ||
+                    size != rhs.size ||
+                    patch != rhs.patch;
+            }
+
+            // hash function for unordered_map
+            std::size_t operator()(const GeometryKey& key) const
+            {
+                return osgEarth::hash_value_unsigned(
+                    (unsigned)key.lod,
+                    (unsigned)key.tileY,
+                    key.size,
+                    key.patch ? 1u : 0u);
+            }
+
+            int      lod;
+            int      tileY;
+            bool     patch;
+            unsigned size;
+        };
+    }
+}
+
+namespace std
+{
+    // std::hash specialization for GeometryKey
+    template<> struct hash<osgEarth::REX::GeometryKey> {
+        inline size_t operator()(const osgEarth::REX::GeometryKey& key) const {
+            return osgEarth::hash_value_unsigned(
+                (unsigned)key.lod,
+                (unsigned)key.tileY,
+                key.size, key.patch ? 1u : 0u);
+        }
     };
+}
 
+
+namespace osgEarth
+{
+    namespace REX
+    {
     /**
      * Pool of terrain tile geometries.
      *
@@ -133,105 +292,53 @@ namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
     class GeometryPool : public osg::Group
     {
     public:
-        /** Construct the geometry pool */
-        GeometryPool(const RexTerrainEngineOptions& options);
+        //! Construct the geometry pool
+        GeometryPool();
 
-        /** Sets an object to release unused GL resources */
-        void setReleaser(ResourceReleaser* releaser);
-
-    public:
-        /**
-         * Hashtable key for unique (and therefore shareable) geometries.
-         */
-        struct GeometryKey
-        {
-            GeometryKey() :
-                lod(-1),
-                tileY(0),
-                patch(false),
-                size(0u)
-                {
-                }
-
-            bool operator < (const GeometryKey& rhs) const
-            {
-                if (lod < rhs.lod) return true;
-                if (lod > rhs.lod) return false;
-                if (tileY < rhs.tileY) return true;
-                if (tileY > rhs.tileY) return false;
-                if (size < rhs.size) return true;
-                if (size > rhs.size) return false;
-                if (patch == false && rhs.patch == true) return true;
-                return false;
-            }
-
-            int      lod;
-            int      tileY;
-            bool     patch;
-            unsigned size;
-        };
-
-        typedef std::map<GeometryKey, osg::ref_ptr<SharedGeometry> > GeometryMap;
-
-        /**
-         * Gets the Geometry associated with a tile key, creating a new one if
-         * necessary and storing it in the pool.
-         */
+        //! Gets the Geometry associated with a tile key, creating a new one if
+        //! necessary and storing it in the pool.
         void getPooledGeometry(
-            const TileKey&               tileKey,
-            const MapInfo&               mapInfo,
-            unsigned                     tileSize,
-            MaskGenerator*               maskSet,
-            osg::ref_ptr<SharedGeometry>& out);
+            const TileKey& tileKey,
+            unsigned tileSize,
+            const Map* map,
+            const TerrainOptionsAPI& options,
+            osg::ref_ptr<SharedGeometry>& out,
+            Cancelable* state);
 
-        /**
-         * The number of elements (incides) in the terrain skirt, if applicable
-         */
-        int getNumSkirtElements(unsigned tileSize) const;
-
-        /**
-         * Are we doing pooling?
-         */
+        //! Are we doing pooling?
         bool isEnabled() const { return _enabled; }
 
-        /**
-         * Clear and reset the pool.
-         */
+        //! Clear and reset the pool.
         void clear();
-
 
     public: // osg::Node
 
-        /** Perform an update traversal to check for unused resources. */
+        //! Perform an update traversal to check for unused resources
         void traverse(osg::NodeVisitor& nv);
 
+        void resizeGLObjectBuffers(unsigned maxsize);
+        void releaseGLObjects(osg::State* state) const;
+
     protected:
-        virtual ~GeometryPool() { }
+        using GeometryMap = std::unordered_map<GeometryKey, osg::ref_ptr<SharedGeometry>>;
 
-        mutable Threading::Mutex       _geometryMapMutex;
-        GeometryMap                    _geometryMap;
-        //unsigned                       _tileSize;
-        const RexTerrainEngineOptions& _options; 
-        osg::ref_ptr<ResourceReleaser> _releaser;
+        mutable Threading::Gate<GeometryKey> _keygate;
+        mutable std::mutex _geometryMapMutex;
+        GeometryMap _geometryMap;
+        osg::ref_ptr<SharedDrawElements> _defaultPrimSet;
 
-        mutable osg::ref_ptr<osg::Vec3Array> _sharedTexCoords;
-        
         void createKeyForTileKey(
-            const TileKey& tileKey, 
+            const TileKey& tileKey,
             unsigned       size,
-            const MapInfo& mapInfo,
             GeometryKey&   out) const;
 
-        SharedGeometry* createGeometry(
-            const TileKey& tileKey,
-            const MapInfo& mapInfo,
-            unsigned       tileSize,
-            MaskGenerator* maskSet ) const;
+        osg::ref_ptr<SharedGeometry> convertTileMeshToSharedGeometry(
+            const TileMesh& mesh) const;
 
         bool _enabled;
         bool _debug;
     };
 
-} } } // namespace osgEarth::Drivers::RexTerrainEngine
+} } // namespace osgEarth::REX
 
 #endif // OSGEARTH_DRIVERS_REX_TERRAIN_ENGINE_GEOMETRY_POOL

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -16,8 +16,7 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
-#ifndef OSGEARTH_POINTDRAWABLE_H
-#define OSGEARTH_POINTDRAWABLE_H 1
+#pragma once
 
 #include <osgEarth/Common>
 #include <osg/Array>
@@ -58,6 +57,9 @@ namespace osgEarth
         
         //! Append a vertex to the drawable
         void pushVertex(const osg::Vec3& vert);
+
+        //! Insert a vertex to the drawable
+        void insert(unsigned where, const osg::Vec3& vert);
 
         //! Set the value of a vertex at index i
         void setVertex(unsigned i, const osg::Vec3& vert);
@@ -154,7 +156,6 @@ namespace osgEarth
         void setupState();
         void updateFirstCount();
 
-        static osg::observer_ptr<osg::StateSet> s_sharedStateSet;
         osg::ref_ptr<osg::StateSet> _sharedStateSet;
         mutable bool _sharedStateSetCompiled;
 
@@ -230,5 +231,3 @@ namespace osgEarth
     }
 
 } // namespace osgEarth
-
-#endif // OSGEARTH_POINTDRAWABLE_H

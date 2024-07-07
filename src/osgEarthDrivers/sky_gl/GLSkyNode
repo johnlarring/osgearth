@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -18,12 +18,11 @@
  */
 
 #include "GLSkyOptions"
-#include <osgEarthUtil/Sky>
+#include <osgEarth/Sky>
 #include <osgEarth/PhongLightingEffect>
 #include <osg/MatrixTransform>
 
 namespace osg {
-    class EllipsoidModel;
     class Light;
     class LightSource;
 }
@@ -51,12 +50,15 @@ namespace osgEarth { namespace GLSky
         void onSetDateTime();
         void onSetReferencePoint();
 
+        void traverse(osg::NodeVisitor& nv) override;
+
     protected:
         virtual ~GLSkyNode();
 
     private:
         void construct();
 
+        osg::ref_ptr<osg::LightSource>    _lightSource;
         osg::ref_ptr<osg::Light>          _light;
         osg::ref_ptr<PhongLightingEffect> _lighting;
         GLSkyOptions                      _options;

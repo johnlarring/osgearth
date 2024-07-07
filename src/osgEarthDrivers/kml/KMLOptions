@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -21,13 +21,12 @@
 
 #include <osgEarth/Common>
 #include <osgEarth/URI>
-#include <osgEarthSymbology/Style>
+#include <osgEarth/Style>
 #include <osg/Image>
 
-namespace osgEarth { namespace Drivers
+namespace osgEarth { namespace KML
 {
     using namespace osgEarth;
-    using namespace osgEarth::Symbology;
 
     /**
      * Options for the KML loader. You can pass an instance of this class
@@ -69,8 +68,16 @@ namespace osgEarth { namespace Drivers
         const optional<osg::Quat>& modelRotation() const { return _modelRotation; }
 
     public:
-        KMLOptions() : _declutter( true ), _iconBaseScale( 1.0f ), _iconMaxSize(32), _modelScale(1.0f) { }
+        KMLOptions() : _declutter(true), _iconBaseScale(1.0f), _iconMaxSize(32), _modelScale(1.0f)
+        {
+            _defaultTextSymbol = new TextSymbol();
+            _defaultTextSymbol->size() = 18.0f;
+            _defaultTextSymbol->halo() = Stroke(0.3f, 0.3f, 0.3f, 1.0f);
 
+            _defaultIconSymbol = new IconSymbol();
+            _defaultIconSymbol->url().mutable_value().setLiteral("https://github.com/gwaldron/osgearth/blob/master/data/placemark32.png?raw=true");
+        }
+    
         virtual ~KMLOptions() { }
 
     protected:
@@ -84,6 +91,6 @@ namespace osgEarth { namespace Drivers
         osg::ref_ptr<osg::Group> _iconAndLabelGroup;
     };
 
-} } // namespace osgEarth::Drivers
+} } // namespace osgEarth::KML
 
 #endif // OSGEARTH_DRIVER_KML_OPTIONS

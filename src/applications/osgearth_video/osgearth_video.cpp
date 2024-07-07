@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -29,17 +29,10 @@
 #include <osgEarth/Registry>
 #include <osgEarth/ImageLayer>
 #include <osgEarth/VideoLayer>
-#include <osgEarthUtil/EarthManipulator>
-#include <osgEarthUtil/AutoClipPlaneHandler>
-#include <osgEarthUtil/Controls>
-#include <osgEarthSymbology/Color>
-#include <osgEarthDrivers/tms/TMSOptions>
-#include <osgEarthDrivers/wms/WMSOptions>
-#include <osgEarthDrivers/gdal/GDALOptions>
-#include <osg/ImageStream>
+#include <osgEarth/TMS>
+#include <osgEarth/EarthManipulator>
 
 using namespace osgEarth;
-using namespace osgEarth::Drivers;
 using namespace osgEarth::Util;
 
 /**
@@ -48,21 +41,32 @@ using namespace osgEarth::Util;
 int
 main(int argc, char** argv)
 {
+    osgEarth::initialize();
+
     osg::ArgumentParser arguments(&argc,argv);
+
+    if (argc < 2)
+    {
+        OE_WARN << "Usage: osgearth_video <video1>" << std::endl;
+        return -1;
+    }
+
+    // initialize a viewer:
+    osgViewer::Viewer viewer(arguments);
 
     // create the empty map.
     Map* map = new Map();
 
     // add a TMS imagery layer:
-    TMSOptions imagery;
-    imagery.url() = "http://readymap.org/readymap/tiles/1.0.0/22/";
-    map->addLayer( new ImageLayer("ReadyMap Imagery", imagery) );
+    TMSImageLayer* imagery = new TMSImageLayer();
+    imagery->setURL("http://readymap.org/readymap/tiles/1.0.0/22/");
+    map->addLayer(imagery);
 
     // add a TMS elevation layer:
-    TMSOptions elevation;
-    elevation.url() = "http://readymap.org/readymap/tiles/1.0.0/116/";
-    map->addLayer( new ElevationLayer("ReadyMap Elevation", elevation) );
-   
+    TMSElevationLayer* elevation = new TMSElevationLayer();
+    elevation->setURL("http://readymap.org/readymap/tiles/1.0.0/116/");
+    map->addLayer(elevation);
+
     // Load command line arguments as videos.
     for(int pos=1;pos<arguments.argc();++pos)
     {
@@ -70,9 +74,9 @@ main(int argc, char** argv)
         {
             std::string filename = arguments[ pos ];
             OE_NOTICE << "Loading " << filename << std::endl;
-            VideoLayerOptions opt;
-            opt.url() = filename;
-            VideoLayer* layer = new VideoLayer(opt);
+
+            VideoLayer* layer = new VideoLayer();
+            layer->options().url() = filename;
             map->addLayer(layer);
         }
     }
@@ -80,8 +84,6 @@ main(int argc, char** argv)
     // make the map scene graph:
     MapNode* node = new MapNode( map );
 
-    // initialize a viewer:
-    osgViewer::Viewer viewer(arguments);
     viewer.setCameraManipulator( new EarthManipulator );
     viewer.setSceneData( node );
 

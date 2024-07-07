@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -24,24 +24,22 @@
 #include <osgEarth/Map>
 #include <osgEarth/MapNode>
 #include <osgEarth/NodeUtils>
-#include <osgEarthUtil/Sky>
-#include <osgEarthUtil/Controls>
-#include <osgEarthUtil/ExampleResources>
+#include <osgEarth/Sky>
+#include <osgEarth/ExampleResources>
 
 #define LC "[GLSkyDriver] "
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
-namespace ui = osgEarth::Util::Controls;
 
 namespace osgEarth { namespace GLSky
 {
-    class GLSkyExtension : public Extension,
-                           public ExtensionInterface<MapNode>,
-                           public ExtensionInterface<osg::View>,
-                           public ExtensionInterface<ui::Control>,
-                           public SkyNodeFactory,
-                           public GLSkyOptions
+    class GLSkyExtension : 
+        public Extension,
+        public ExtensionInterface<MapNode>,
+        public ExtensionInterface<osg::View>,
+        public SkyNodeFactory,
+        public GLSkyOptions
     {
     public:
         META_OE_Extension( osgEarth, GLSkyExtension, sky_gl );
@@ -61,11 +59,6 @@ namespace osgEarth { namespace GLSky
         bool connect( osg::View* );
         bool disconnect( osg::View* ) { return true; }
 
-    public: // ExtensionInterface<ui::Control>
-
-        bool connect( ui::Control* );
-        bool disconnect( ui::Control* );
-
     public: // SkyNodeFactory
 
         SkyNode* createSkyNode();
@@ -73,7 +66,6 @@ namespace osgEarth { namespace GLSky
     protected:
         virtual ~GLSkyExtension() { }
 
-        osg::ref_ptr<ui::Control> _ui;
         osg::ref_ptr<SkyNode> _skyNode;
     };
 
@@ -102,8 +94,8 @@ GLSkyExtension::connect(MapNode* mapNode)
     // Projected map? Set up a reference point at the center of the map
     if (mapNode->getMapSRS()->isProjected())
     {
-        GeoPoint refPoint;
-        mapNode->getMap()->getProfile()->getExtent().getCentroid(refPoint);
+        GeoPoint refPoint = 
+            mapNode->getMap()->getProfile()->getExtent().getCentroid();
         _skyNode->setReferencePoint(refPoint);
     }
 
@@ -126,24 +118,6 @@ GLSkyExtension::connect(osg::View* view)
     {
         _skyNode->attach( view, 0 );
     }
-    return true;
-}
-
-bool
-GLSkyExtension::connect(ui::Control* control)
-{
-    ui::Container* container = dynamic_cast<ui::Container*>(control);
-    if (container && _skyNode.valid())
-        container->addControl(SkyControlFactory::create(_skyNode.get()));
-    return true;
-}
-
-bool
-GLSkyExtension::disconnect(ui::Control* control)
-{
-    ui::Container* container = dynamic_cast<ui::Container*>(control);
-    if (container && _ui.valid())
-        container->removeChild(_ui.get());
     return true;
 }
 

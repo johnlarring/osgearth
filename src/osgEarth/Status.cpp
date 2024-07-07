@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -20,28 +20,17 @@
 #include <osgEarth/StringUtils>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 #define LC "[Status] "
 
 const osgEarth::Status osgEarth::STATUS_OK;
 
-namespace
-{
-    const std::string m[] = {
-        "No error",
-        "Resource unavailable",
-        "Service unavailable",
-        "Configuration error",
-        "Assertion failure",
-        "Error"
-    };
-}
-
-std::string
-Status::toString() const
-{
-    return Stringify()
-        << ((int)_code < 6 ? m[(int)_code] : "Bad error code")
-        << " : "
-        << message();
-}
+std::string osgEarth::Status::_codeText[6] = {
+    "No error",
+    "Resource unavailable",
+    "Service unavailable",
+    "Configuration error",
+    "Assertion failure",
+    "Error"
+};

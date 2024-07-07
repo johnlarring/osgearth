@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -31,7 +31,7 @@
 #include <osgEarth/CachePolicy>
 #include <osgEarth/TileKey>
 #include <osgEarth/Profile>
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
 #include <osgEarth/MemCache>
 #include <osgEarth/Status>
 #include <osgEarth/Containers>
@@ -41,17 +41,19 @@
 #include <osg/Image>
 #include <osg/Shape>
 #include <osgDB/Options>
-#include <osgDB/ReadFile>
 #include <string>
-
 
 namespace osgEarth
 {
     class ProgressCallback;
     class Map;
+}
 
+namespace osgEarth { namespace Contrib
+{
     /**
      * Configuration options for a tile source driver.
+     * @deprecated For legacy application support only
      */
     class OSGEARTH_EXPORT TileSourceOptions : public DriverConfigOptions
     {
@@ -104,10 +106,11 @@ namespace osgEarth
         optional<bool>           _coverage;
         optional<std::string>    _osgOptionString;
     };
-}
-OSGEARTH_SPECIALIZE_CONFIG(osgEarth::TileSourceOptions);
+} }
 
-namespace osgEarth
+OSGEARTH_SPECIALIZE_CONFIG(osgEarth::Contrib::TileSourceOptions);
+
+namespace osgEarth { namespace Contrib
 {
     /**
      * A collection of tiles that should be considered blacklisted
@@ -171,6 +174,7 @@ namespace osgEarth
      * A TileSource is an object that can create image and/or heightfield tiles. Driver
      * plugins are responsible for creating and returning a TileSource that the Map
      * will then use to create tiles for tile keys.
+     * @deprecated For legacy application support only
      */
     class OSGEARTH_EXPORT TileSource : public virtual osg::Object
     {
@@ -269,7 +273,7 @@ namespace osgEarth
          * image with one 32-bit channel and call storeImage.)
          */
         virtual bool storeHeightField(const TileKey&    key,
-                                      osg::HeightField* hf,
+                                      const osg::HeightField* hf,
                                       ProgressCallback* progress);
 
     public:
@@ -397,9 +401,7 @@ namespace osgEarth
         TileSourceOptions _options;
 
         friend class Map;
-        friend class MapEngine;
         friend class TileSourceFactory;
-        friend class CompositeTileSource;
 
         osg::ref_ptr< TileBlacklist > _blacklist;
         std::string _blacklistFilename;
@@ -416,11 +418,8 @@ namespace osgEarth
 
         bool _openCalled;
 
-        mutable Threading::Mutex _mutex;
+        mutable std::mutex _mutex;
     };
-
-
-    typedef std::vector< osg::ref_ptr<TileSource> > TileSourceVector;
 
     //--------------------------------------------------------------------
 
@@ -448,6 +447,6 @@ namespace osgEarth
          */
         static TileSource* create(const TileSourceOptions& options);
     };
-}
+} }
 
 #endif // OSGEARTH_TILE_SOURCE_H

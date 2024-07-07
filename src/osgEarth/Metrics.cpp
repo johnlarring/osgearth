@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
  * Copyright 2008-2012 Pelican Mapping
  * http://osgearth.org
  *
@@ -16,481 +16,163 @@
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
-#include <osgEarth/Metrics>
-#include <osgEarth/ThreadingUtils>
-#include <osgEarth/Memory>
-#include <osgViewer/Viewer>
-#include <cstdarg>
 
-using namespace osgEarth;
+
+#include <osgEarth/Metrics>
+#include <osgViewer/ViewerBase>
+#include <osgViewer/View>
+#include <osgEarth/MemoryUtils>
+#include <stdlib.h>
+
+using namespace osgEarth::Util;
 
 #define LC "[Metrics] "
 
+static bool s_metricsEnabled = true;
+static bool s_gpuMetricsEnabled = true;
+static bool s_gpuMetricsInstalled = false;
+
+#ifdef OSGEARTH_HAVE_TRACY
+
+#ifdef OSGEARTH_GPU_PROFILING
+void (GL_APIENTRY * osgEarth::MetricsGL::_glGenQueries)(GLsizei, GLuint*);
+void (GL_APIENTRY * osgEarth::MetricsGL::_glGetInteger64v)(GLenum, GLint64*);
+void (GL_APIENTRY * osgEarth::MetricsGL::_glGetQueryiv)(GLenum, GLenum, GLint*);
+void (GL_APIENTRY * osgEarth::MetricsGL::_glGetQueryObjectiv)(GLint, GLenum, GLint*);
+void (GL_APIENTRY * osgEarth::MetricsGL::_glGetQueryObjectui64v)(GLint, GLenum, GLuint64*);
+void (GL_APIENTRY * osgEarth::MetricsGL::_glQueryCounter)(GLuint, GLenum);
+#endif
+
 namespace
 {
-    static osg::ref_ptr< MetricsBackend > s_metrics_backend;
-    static bool s_metrics_debug = false;
-
-    class MetricsStartup
+#ifdef OSGEARTH_GPU_PROFILING
+    struct TracyGPUCallback : public osg::GraphicsContext::SwapCallback
     {
-    public:
-        MetricsStartup()
-        {
-            const char* metricsFile = ::getenv("OSGEARTH_METRICS_FILE");
-            if (metricsFile)
-            {
-                Metrics::setMetricsBackend(new ChromeMetricsBackend(std::string(metricsFile)));
-            }
-            const char* metricsVerbose = ::getenv("OSGEARTH_METRICS_DEBUG");
-            if (metricsVerbose)
-            {
-                s_metrics_debug = true;
-            }
-        }
+        TracyGPUCallback() : _tracyInit(false) { }
+        bool _tracyInit;
 
-        ~MetricsStartup()
+        void swapBuffersImplementation(osg::GraphicsContext* gc)
         {
-            Metrics::setMetricsBackend(0);
+            // Enable and collect tracy gpu stats.  There is a better place for this somewhere else :)
+            if (!_tracyInit)
+            {
+                osg::setGLExtensionFuncPtr(osgEarth::MetricsGL::_glGenQueries, "glGenQueries");
+                osg::setGLExtensionFuncPtr(osgEarth::MetricsGL::_glGetInteger64v, "glGetInteger64v");
+                osg::setGLExtensionFuncPtr(osgEarth::MetricsGL::_glGetQueryiv, "glGetQueryiv");
+                osg::setGLExtensionFuncPtr(osgEarth::MetricsGL::_glGetQueryObjectiv, "glGetQueryObjectiv");
+                osg::setGLExtensionFuncPtr(osgEarth::MetricsGL::_glGetQueryObjectui64v, "glGetQueryObjectui64v");
+                osg::setGLExtensionFuncPtr(osgEarth::MetricsGL::_glQueryCounter, "glQueryCounter");
+
+                TracyGpuContext;
+                _tracyInit = true;
+            }
+
+            // Run the default system swapBufferImplementation
+            {
+                OE_PROFILING_ZONE_NAMED("SwapBuffers");
+                TracyGpuZone("SwapBuffers");
+                gc->swapBuffersImplementation();
+            }
+
+            TracyGpuCollect;
         }
     };
-
-    static MetricsStartup s_metricsStartup;
+#endif
 }
+#endif // OSGEARTH_HAVE_TRACY
 
-void Metrics::begin(const std::string& name, const Config& args)
-{
-    if (s_metrics_backend.valid())
-    {
-        if (s_metrics_debug)
-            OE_INFO << LC << "begin: " << name << "  " << (args.empty() ? "" : args.toJSON(false)) << std::endl;
-
-        s_metrics_backend->begin(name, args);
-    }
-}
-
-Config Metrics::encodeArgs(unsigned count, ...)
-{
-    Config conf;
-
-    va_list args;
-    va_start( args, count );
-
-    for (unsigned int i = 0; i < count; i++)
-    {
-        char* key = va_arg(args, char*);
-        char* value = va_arg(args, char*);
-        conf.add( key, value );
-    }
-
-    va_end(args);
-
-    return conf;
-}
-
-void Metrics::begin(const std::string& name, unsigned int argCount, ...)
-{
-    if (!s_metrics_backend.valid())
-        return;
-
-    Config conf;
-
-    va_list args;
-    va_start( args, argCount );
-
-    for (unsigned int i = 0; i < argCount; i++)
-    {
-        char* key = va_arg(args, char*);
-        char* value = va_arg(args, char*);
-        conf.add( key, value );
-    }
-
-    va_end(args);
-
-    begin(name, conf);
-}
-
-void Metrics::end(const std::string& name, unsigned int argCount, ...)
-{
-    if (!s_metrics_backend.valid())
-        return;
-
-    Config conf;
-
-    va_list args;
-    va_start( args, argCount );
-
-    for (unsigned int i = 0; i < argCount; i++)
-    {
-        char* key = va_arg(args, char*);
-        char* value = va_arg(args, char*);
-        conf.add( key, value );
-    }
-
-    va_end(args);
-
-    end(name, conf);
-}
-
-void Metrics::end(const std::string& name, const Config& args)
-{
-    if (s_metrics_backend.valid())
-    {
-        s_metrics_backend->end(name, args);
-
-        if (s_metrics_debug)
-            OE_INFO << LC << "end: " << name << "  " << (args.empty() ? "" : args.toJSON(false)) << std::endl;
-    }
-}
-
-void Metrics::counter(const std::string& graph,const std::string& name0, double value0)
-{
-    Metrics::counter(graph, name0, value0,
-                            "", 0.0,
-                            "", 0.0);
-}
-
-void Metrics::counter(const std::string& graph,const std::string& name0, double value0,
-                                        const std::string& name1, double value1)
-{
-    Metrics::counter(graph, name0, value0,
-                            name1, value1,
-                            "", 0.0);
-}
-
-
-void Metrics::counter(const std::string& graph,const std::string& name0, double value0,
-                                        const std::string& name1, double value1,
-                                        const std::string& name2, double value2)
-{
-    if (s_metrics_backend.valid())
-    {
-        s_metrics_backend->counter(graph, name0, value0,
-                                          name1, value1,
-                                          name2, value2);
-    }
-}
-
-MetricsBackend* Metrics::getMetricsBackend()
-{
-    return s_metrics_backend.get();
-}
-
-void Metrics::setMetricsBackend(MetricsBackend* backend)
-{
-    s_metrics_backend = backend;
-}
 
 bool Metrics::enabled()
 {
-    return getMetricsBackend() != NULL;
+    return s_metricsEnabled;
 }
 
-int Metrics::run(osgViewer::Viewer& viewer)
+void Metrics::setEnabled(bool enabled)
 {
-    if (Metrics::enabled())
+    s_metricsEnabled = enabled;
+}
+
+void Metrics::setGPUProfilingEnabled(bool enabled)
+{
+    s_gpuMetricsEnabled = enabled;
+}
+
+void Metrics::frame()
+{
+    OE_PROFILING_FRAME_MARK;
+}
+
+int Metrics::run(osgViewer::ViewerBase& viewer)
+{
+    if (!viewer.isRealized())
     {
-        if (!viewer.isRealized())
+        viewer.realize();
+    }
+
+#ifdef OSGEARTH_HAVE_TRACY
+
+    if (s_gpuMetricsEnabled == false &&
+        ::getenv("OE_PROFILE_GPU") != NULL)
+    {
+        s_gpuMetricsEnabled = true;
+    }
+
+    // Report memory and fps every 60 frames.
+    unsigned int reportEvery = 60;
+
+    osgViewer::ViewerBase::Views views;
+    viewer.getViews(views);
+
+#ifdef OSGEARTH_GPU_PROFILING
+    if (s_gpuMetricsEnabled)
+    {
+        osgViewer::ViewerBase::Contexts contexts;
+        viewer.getContexts(contexts);
+        for(auto& context : contexts)
         {
-            viewer.realize();
+            context->setSwapCallback(new TracyGPUCallback());
         }
+    }
+#endif
 
-        // If Metrics are enabled, enable stats on the Viewer so that it we can report them for the Metrics
-        if (Metrics::enabled())
+    while (!viewer.done())
+    {
         {
-            osgViewer::ViewerBase::Scenes scenes;
-            viewer.getScenes(scenes);
-            for (osgViewer::ViewerBase::Scenes::iterator itr = scenes.begin();
-                itr != scenes.end();
-                ++itr)
-            {
-                osgViewer::Scene* scene = *itr;
-                osgDB::DatabasePager* dp = scene->getDatabasePager();
-                if (dp && dp->isRunning())
-                {
-                    dp->resetStats();
-                }
-            }
-
-            viewer.getViewerStats()->collectStats("frame_rate", true);
-            viewer.getViewerStats()->collectStats("event", true);
-            viewer.getViewerStats()->collectStats("update", true);
-
-            viewer.getCamera()->getStats()->collectStats("rendering", true);
-            viewer.getCamera()->getStats()->collectStats("gpu", true);
+            OE_PROFILING_ZONE_NAMED("advance");
+            viewer.advance();
         }
 
-        // Report memory and fps every 10 frames.
-        unsigned int reportEvery = 10;
-
-        while (!viewer.done())
         {
-            {
-                METRIC_SCOPED_EX("frame", 1, "number", toString<int>(viewer.getFrameStamp()->getFrameNumber()).c_str());
-                {
-                    METRIC_SCOPED("advance");
-                    viewer.advance();
-                }
-
-                {
-                    METRIC_SCOPED("event");
-                    viewer.eventTraversal();
-                }
-
-                {
-                    METRIC_SCOPED("update");
-                    viewer.updateTraversal();
-                }
-
-                {
-                    METRIC_SCOPED("render");
-                    viewer.renderingTraversals();
-                }
-
-            }
-
-            // Report memory and fps periodically. periodically.
-            if (viewer.getFrameStamp()->getFrameNumber() % reportEvery == 0)
-            {
-                // Only report the metrics if they are enabled to avoid computing the memory.
-                if (Metrics::enabled())
-                {
-                    Metrics::counter("Memory::WorkingSet", "WorkingSet", Memory::getProcessPhysicalUsage() / 1048576);
-                    Metrics::counter("Memory::PrivateBytes", "PrivateBytes", Memory::getProcessPrivateUsage() / 1048576);
-                    Metrics::counter("Memory::PeakPrivateBytes", "PeakPrivateBytes", Memory::getProcessPeakPrivateUsage() / 1048576);
-                }
-            }
-
-            double eventTime = 0.0;
-            if (viewer.getViewerStats()->getAttribute(viewer.getViewerStats()->getLatestFrameNumber(), "Event traversal time taken", eventTime))
-            {
-                Metrics::counter("Viewer::Event", "Event", eventTime * 1000.0);
-            }
-
-            double updateTime = 0.0;
-            if (viewer.getViewerStats()->getAttribute(viewer.getViewerStats()->getLatestFrameNumber(), "Update traversal time taken", updateTime))
-            {
-                Metrics::counter("Viewer::Update", "Update", updateTime * 1000.0);
-            }
-
-            double cullTime = 0.0;
-            if (viewer.getCamera()->getStats()->getAttribute(viewer.getCamera()->getStats()->getLatestFrameNumber(), "Cull traversal time taken", cullTime))
-            {
-                Metrics::counter("Viewer::Cull", "Cull", cullTime * 1000.0);
-            }
-
-            double drawTime = 0.0;
-            if (viewer.getCamera()->getStats()->getAttribute(viewer.getCamera()->getStats()->getLatestFrameNumber(), "Draw traversal time taken", drawTime))
-            {
-                Metrics::counter("Viewer::Draw", "Draw", drawTime * 1000.0);
-            }
-
-            double gpuTime = 0.0;
-            if (viewer.getCamera()->getStats()->getAttribute(viewer.getCamera()->getStats()->getLatestFrameNumber()-1, "GPU draw time taken", gpuTime))
-            {
-                Metrics::counter("Viewer::GPU", "GPU", gpuTime * 1000.0);
-            }
-
-            double frameRate = 0.0;
-            if (viewer.getViewerStats()->getAttribute(viewer.getViewerStats()->getLatestFrameNumber() - 1, "Frame rate", frameRate))
-            {
-                Metrics::counter("Viewer::FPS", "FPS", frameRate);
-            }
-
+            OE_PROFILING_ZONE_NAMED("eventTraversal");
+            viewer.eventTraversal();
         }
 
-        return 0;
-    }
-
-    else
-    {
-        return viewer.run();
-    }
-}
-
-
-
-ChromeMetricsBackend::ChromeMetricsBackend(const std::string& filename):
-_firstEvent(true)
-{
-    _startTime = osg::Timer::instance()->tick();
-    _metricsFile.open(filename.c_str(), std::ios::out);
-    _metricsFile << "[";
-}
-
-ChromeMetricsBackend::~ChromeMetricsBackend()
-{
-     OpenThreads::ScopedLock< OpenThreads::Mutex > lk(_mutex);
-    _metricsFile << "]";
-    _metricsFile.close();
-}
-
-void ChromeMetricsBackend::begin(const std::string& name, const Config& args)
-{
-    osg::Timer_t now = osg::Timer::instance()->tick();
-
-    OpenThreads::ScopedLock< OpenThreads::Mutex > lk(_mutex);
-    if (_firstEvent)
-    {
-        _firstEvent = false;
-    }
-    else
-    {
-        _metricsFile << "," << std::endl;
-    }
-    _metricsFile << "{"
-        << "\"cat\": \"" << "" << "\","
-        << "\"pid\": \"" << 0 << "\","
-        << "\"tid\": \"" << osgEarth::Threading::getCurrentThreadId() << "\","
-        << "\"ts\": \""  << std::setprecision(9) << osg::Timer::instance()->delta_u(_startTime, now) << "\","
-        << "\"ph\": \"B\","
-        << "\"name\": \""  << name << "\"";
-
-    if (!args.empty())
-    {
-        _metricsFile << "," << std::endl << " \"args\": {";
-        bool first = true;
-        for( ConfigSet::const_iterator i = args.children().begin(); i != args.children().end(); ++i ) {
-            if (first)
-            {
-                first = !first;
-            }
-            else
-            {
-                _metricsFile << "," << std::endl;
-            }
-            _metricsFile << "\"" << i->key() << "\" : \"" << i->value() << "\"";
+        {
+            OE_PROFILING_ZONE_NAMED("updateTraversal");
+            viewer.updateTraversal();
         }
-        _metricsFile << "}";
-    }
 
-    _metricsFile << "}";
-}
-
-void ChromeMetricsBackend::end(const std::string& name, const Config& args)
-{
-    osg::Timer_t now = osg::Timer::instance()->tick();
-
-    OpenThreads::ScopedLock< OpenThreads::Mutex > lk(_mutex);
-    if (_firstEvent)
-    {
-        _firstEvent = false;
-    }
-    else
-    {
-        _metricsFile << "," << std::endl;
-    }
-    _metricsFile << "{"
-        << "\"cat\": \"" << "" << "\","
-        << "\"pid\": \"" << 0 << "\","
-        << "\"tid\": \"" << osgEarth::Threading::getCurrentThreadId() << "\","
-        << "\"ts\": \""  << std::setprecision(9) << osg::Timer::instance()->delta_u(_startTime, now) << "\","
-        << "\"ph\": \"E\","
-        << "\"name\": \""  << name << "\"";
-
-    if (!args.empty())
-    {
-        _metricsFile << "," << std::endl << " \"args\": {";
-        bool first = true;
-        for( ConfigSet::const_iterator i = args.children().begin(); i != args.children().end(); ++i ) {
-            if (first)
-            {
-                first = !first;
-            }
-            else
-            {
-                _metricsFile << "," << std::endl;
-            }
-            _metricsFile << "\"" << i->key() << "\" : \"" << i->value() << "\"";
+        {
+            OE_PROFILING_ZONE_NAMED("renderingTraversals");
+            viewer.renderingTraversals();
         }
-        _metricsFile << "}";
+
+        // Report memory and fps periodically. periodically.
+        if (views[0]->getFrameStamp()->getFrameNumber() % reportEvery == 0)
+        {         
+            OE_PROFILING_PLOT("WorkingSet", (float)(Memory::getProcessPhysicalUsage() / 1048576));
+            OE_PROFILING_PLOT("PrivateBytes", (float)(Memory::getProcessPrivateUsage() / 1048576));
+            OE_PROFILING_PLOT("PeakPrivateBytes", (float)(Memory::getProcessPeakPrivateUsage() / 1048576));                                                                                                 
+        }
+
+        frame();
     }
 
-    _metricsFile << "}";
+    return 0;
+
+#else
+
+    return viewer.run();
+
+#endif
 }
-
-void ChromeMetricsBackend::counter(const std::string& graph,
-                             const std::string& name0, double value0,
-                             const std::string& name1, double value1,
-                             const std::string& name2, double value2)
-{
-    osg::Timer_t now = osg::Timer::instance()->tick();
-
-    OpenThreads::ScopedLock< OpenThreads::Mutex > lk(_mutex);
-    if (_firstEvent)
-    {
-        _firstEvent = false;
-    }
-    else
-    {
-        _metricsFile << "," << std::endl;
-    }
-
-    _metricsFile << "{"
-        << "\"cat\": \"" << "" << "\","
-        << "\"pid\": \"" << 0 << "\","
-        << "\"tid\": \"" << osgEarth::Threading::getCurrentThreadId() << "\","
-        << "\"ts\": \""  << std::setprecision(9) << osg::Timer::instance()->delta_u(_startTime, now) << "\","
-        << "\"ph\": \"C\","
-        << "\"name\": \""  << graph << "\","
-        << "\"args\" : {";
-
-    if (!name0.empty())
-    {
-        _metricsFile << "    \"" << name0 << "\": " << std::setprecision(9) << value0;
-    }
-
-    if (!name1.empty())
-    {
-        _metricsFile << ",    \"" << name1 << "\": " << std::setprecision(9) <<value1;
-    }
-
-    if (!name2.empty())
-    {
-        _metricsFile << ",    \"" << name2 << "\": " << std::setprecision(9) <<value2;
-    }
-
-    _metricsFile << "}}";
-}
-
-
-
-ScopedMetric::ScopedMetric(const std::string& name) :
-_name(name)
-{
-    static Config s_emptyConfig;
-    Metrics::begin(_name, s_emptyConfig);
-}
-
-ScopedMetric::ScopedMetric(const std::string& name, const Config& args) :
-_name(name)
-{
-    Metrics::begin(_name, args);
-}
-
-ScopedMetric::ScopedMetric(const std::string& name, int argCount, ...) :
-_name(name)
-{
-    if (!s_metrics_backend) return;
-
-    Config conf;
-
-    va_list args;
-    va_start( args, argCount );
-
-    for (unsigned int i = 0; i < argCount; i++)
-    {
-        char* key = va_arg(args, char*);
-        char* value = va_arg(args, char*);
-        conf.add( key, value );
-    }
-
-    va_end(args);
-
-    Metrics::begin(_name, conf);
-}
-
-ScopedMetric::~ScopedMetric()
-{
-    Metrics::end(_name);
-}
-

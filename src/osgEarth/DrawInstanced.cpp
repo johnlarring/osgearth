@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -23,23 +23,47 @@
 #include <osgEarth/Utils>
 #include <osgEarth/Shaders>
 #include <osgEarth/ObjectIndex>
+#include <osgEarth/TextureBuffer>
 
+#include <osg/TriangleFunctor>
+#include <osg/TriangleIndexFunctor>
 #include <osg/ComputeBoundsVisitor>
-#include <osg/TextureBuffer>
+#include <osg/KdTree>
+#include <osgDB/ObjectWrapper>
+#include <osgDB/Registry>
+#include <osgUtil/Optimizer>
+
+#include <osgDB/WriteFile>
 
 #define LC "[DrawInstanced] "
 
 using namespace osgEarth;
-using namespace osgEarth::DrawInstanced;
+using namespace osgEarth::Util;
 
 // Ref: http://sol.gfxile.net/instancing.html
-
-#define TAG_MATRIX_VECTOR "osgEarth::DrawInstanced::MatrixRefVector"
 
 //Uncomment to experiment with instance count adjustment
 //#define USE_INSTANCE_LODS
 
 //----------------------------------------------------------------------
+
+namespace osgEarth { namespace Util
+{
+    class MakeTransformsStatic : public osg::NodeVisitor
+    {
+    public:
+        MakeTransformsStatic() : osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ALL_CHILDREN)
+        {
+            setNodeMaskOverride(~0);
+        }
+
+        void apply(osg::Transform& node)
+        {
+            node.setDataVariance(osg::Object::STATIC);
+            traverse(node);
+        }
+    };
+} }
 
 namespace
 {
@@ -119,37 +143,24 @@ namespace
 
 }
 
-//----------------------------------------------------------------------
 
-
-namespace
-{
-    struct StaticBBox : public osg::Drawable::ComputeBoundingBoxCallback
-    {
-        osg::BoundingBox _box;
-        StaticBBox(const osg::BoundingBox& box) : _box(box) { }
-        osg::BoundingBox computeBound(const osg::Drawable&) const { return _box; }
-    };
-}
+using namespace DrawInstanced;
 
 ConvertToDrawInstanced::ConvertToDrawInstanced(unsigned                numInstances,
-                                               const osg::BoundingBox& bbox,
                                                bool                    optimize,
                                                osg::TextureBuffer*     tbo,
                                                int                     defaultUnit) :
 _numInstances( numInstances ),
-_bbox(bbox),
 _optimize( optimize ),
 _tbo(tbo),
 _tboUnit(defaultUnit)
 {
     setTraversalMode( TRAVERSE_ALL_CHILDREN );
     setNodeMaskOverride( ~0 );
-    _bboxComputer = new StaticBBox(bbox);
 }
 
 
-void 
+void
 ConvertToDrawInstanced::apply(osg::Drawable& drawable)
 {
     osg::Geometry* geom = drawable.asGeometry();
@@ -162,7 +173,6 @@ ConvertToDrawInstanced::apply(osg::Drawable& drawable)
             geom->setUseVertexBufferObjects( true );
         }
 
-        geom->setComputeBoundingBoxCallback(_bboxComputer.get());
         geom->dirtyBound();
 
         // convert to use DrawInstanced
@@ -212,7 +222,7 @@ ConvertToDrawInstanced::apply(osg::Node& node)
     if (stateSet)
     {
         int numTexAttrs = stateSet->getNumTextureAttributeLists();
-        _tboUnit = std::max(_tboUnit, numTexAttrs);
+        _tboUnit = osg::maximum(_tboUnit, numTexAttrs);
     }
     traverse(node);
 }
@@ -222,14 +232,14 @@ DrawInstanced::install(osg::StateSet* stateset)
 {
     if ( !stateset )
         return false;
-    
+
     if ( !Registry::capabilities().supportsDrawInstanced() )
         return false;
 
     VirtualProgram* vp = VirtualProgram::getOrCreate(stateset);
     vp->setName("DrawInstanced");
     osgEarth::Shaders pkg;
-    pkg.load( vp, pkg.InstancingVertex );
+    pkg.load( vp, pkg.Instancing );
 
     return true;
 }
@@ -246,8 +256,232 @@ DrawInstanced::remove(osg::StateSet* stateset)
         return;
 
     Shaders pkg;
-    pkg.unload( vp, pkg.InstancingVertex );
+    pkg.unload( vp, pkg.Instancing );
 }
+
+InstanceGeometry::InstanceGeometry()
+{
+}
+
+InstanceGeometry::InstanceGeometry(const osg::Geometry& geometry):
+    osg::Geometry(geometry)
+{
+}
+
+InstanceGeometry::InstanceGeometry(const InstanceGeometry& rhs, const osg::CopyOp& copyop):
+    osg::Geometry(rhs),
+    _matrices(rhs._matrices)
+{
+}
+
+const std::vector< osg::Matrixf >& InstanceGeometry::getMatrices() const
+{
+    return _matrices;
+}
+
+osg::Matrixf InstanceGeometry::decodeMatrix(const osg::Matrixf& m)
+{
+    osg::Matrixf out = m;
+    float* p = out.ptr();
+    p[3] = p[7] = p[11] = 0.0f, p[15] = 1.0f;
+    return out;
+}
+
+namespace
+{
+    // Triangle functor that collects all triangles for all instance matrices
+    // into a single vertex/index list pair. It also eliminates duplicate verts
+    // if it finds any.
+    struct Mesher
+    {
+        const std::vector<osg::Matrixf>* matrices;
+        osg::Vec3Array* verts;
+        osg::DrawElementsUInt* indices;
+        std::map<osg::Vec3f, unsigned> verts_unique;
+
+        Mesher()
+        {
+            verts = new osg::Vec3Array();
+            indices = new osg::DrawElementsUInt(GL_TRIANGLES);
+        }
+
+        void operator()(const osg::Vec3f& v0, const osg::Vec3f& v1, const osg::Vec3f& v2)
+        {
+            for (const auto& encoded_matrix : *matrices) // make a mutable copy
+            {
+                auto matrix = InstanceGeometry::decodeMatrix(encoded_matrix);
+
+                for (auto& v : { v0, v1, v2 })
+                {
+                    auto v_final = v * matrix;
+                    auto a = verts_unique.insert({ v_final, verts->size() });
+                    if (a.second) verts->push_back(v_final);
+                    indices->push_back(a.first->second);
+                }
+            }
+        }
+    };
+}
+
+void InstanceGeometry::setMatrices(const std::vector< osg::Matrixf >& matrices)
+{
+    _matrices = matrices;
+    _mesh = nullptr;
+
+    const osg::Vec3Array* instance_verts = dynamic_cast<const osg::Vec3Array*>(getVertexArray());
+    if (!instance_verts)
+    {
+        return void();
+    }
+
+    // Collect all the triangles for the proxy mesh
+    osg::TriangleFunctor<Mesher> mesher;
+    mesher.matrices = &matrices;
+    
+    // Pre-allocate space
+    mesher.verts->reserve(instance_verts->size() * matrices.size());
+    unsigned total_indices = 0;
+    for (auto& ps : getPrimitiveSetList())
+        total_indices += ps->getNumIndices();
+    mesher.indices->reserve(total_indices * matrices.size());
+
+    this->accept(mesher);
+
+    // Make a new proxy mesh:
+    _mesh = new osg::Geometry();
+    _mesh->setVertexArray(mesher.verts);
+    _mesh->addPrimitiveSet(mesher.indices);
+
+    if (osgDB::Registry::instance()->getKdTreeBuilder())
+    {
+        osg::ref_ptr< osg::KdTreeBuilder > kdTreeBuilder = osgDB::Registry::instance()->getKdTreeBuilder()->clone();
+        _mesh->accept(*kdTreeBuilder.get());
+        if (_mesh->getShape())
+        {
+            setShape(_mesh->getShape());
+        }
+    }
+
+    dirtyBound();
+}
+
+void InstanceGeometry::accept(osg::PrimitiveFunctor& f) const
+{
+    if (_mesh.valid())
+    {
+        _mesh->accept(f);
+    }
+    else
+    {
+        osg::Geometry::accept(f);
+    }
+}
+
+void InstanceGeometry::accept(osg::PrimitiveIndexFunctor & f) const
+{
+    if (_mesh.valid())
+    {
+        _mesh->accept(f);
+    }
+    else
+    {
+        osg::Geometry::accept(f);
+    }
+}
+
+osg::BoundingBox InstanceGeometry::computeBoundingBox() const
+{
+    osg::BoundingBox bbox;
+    if (_mesh.valid())
+    {
+        bbox = _mesh->computeBoundingBox();
+    }
+    return bbox;
+}
+
+
+namespace osgEarth {
+    namespace Serializers {
+        namespace InstanceGeometry
+        {
+            static bool checkMatrices(const osgEarth::Util::DrawInstanced::InstanceGeometry& g)
+            {
+                return g.getMatrices().size() > 0;
+            }
+
+            static bool readMatrices(osgDB::InputStream& is, osgEarth::Util::DrawInstanced::InstanceGeometry& g)
+            {
+                unsigned int size = is.readSize(); is >> is.BEGIN_BRACKET;
+                std::vector< osg::Matrixf > matrices;
+                for (unsigned int i = 0; i < size; ++i)
+                {
+                    osg::Matrixf value;
+                    is >> value;
+                    matrices.push_back(value);
+                }
+                is >> is.END_BRACKET;
+                g.setMatrices(matrices);
+                return true;
+            }
+
+            static bool writeMatrices(osgDB::OutputStream& os, const osgEarth::Util::DrawInstanced::InstanceGeometry& g)
+            {
+                const std::vector< osg::Matrixf>& matrices = g.getMatrices();
+                os.writeSize(matrices.size()); os << os.BEGIN_BRACKET << std::endl;
+                for (auto itr = matrices.begin(); itr != matrices.end(); ++itr)
+                {
+                    os << *itr << std::endl;
+                }
+                os << os.END_BRACKET << std::endl;
+                return true;
+            }
+
+
+            REGISTER_OBJECT_WRAPPER(
+                InstanceGeometry,
+                new osgEarth::Util::DrawInstanced::InstanceGeometry,
+                osgEarth::Util::DrawInstanced::InstanceGeometry,
+                "osg::Object osg::Node osg::Drawable osg::Geometry osgEarth::Util::DrawInstanced::InstanceGeometry")
+            {
+                ADD_USER_SERIALIZER(Matrices);
+            }
+        }
+    }
+}
+
+class MakeInstanceGeometryVisitor : public osg::NodeVisitor
+{
+public:
+    MakeInstanceGeometryVisitor(const std::vector< osg::Matrixf> &matrices) :
+        osg::NodeVisitor(osg::NodeVisitor::TRAVERSE_ALL_CHILDREN),
+        _matrices(matrices)
+    {
+    }
+
+    struct DC : public osg::Drawable::DrawCallback {
+        void drawImplementation(osg::RenderInfo& ri, const osg::Drawable* drawable) const {
+            drawable->drawImplementation(ri);
+            // prevents a crash
+            ri.getState()->unbindVertexArrayObject();
+        }
+    };
+
+    virtual void apply(osg::Geometry& geometry)
+    {
+        osg::ref_ptr< InstanceGeometry > instanced = new InstanceGeometry(geometry);
+        instanced->setMatrices(_matrices);
+        unsigned int geometryParentCount = geometry.getNumParents();
+        for (unsigned int i = 0; i < geometryParentCount; i++)
+        {
+            geometry.getParent(i)->replaceChild(&geometry, instanced.get());
+        }
+
+        instanced->setDrawCallback(new DC());
+    }
+
+    std::vector< osg::Matrixf > _matrices;
+};
+
 
 bool
 DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
@@ -259,7 +493,7 @@ DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
     // the structure of the subgraph.
     const osg::BoundingSphere& bs = parent->getBound();
     parent->setInitialBound(bs);
-    //parent->setComputeBoundingSphereCallback(new StaticBound(bs));
+    parent->setCullingActive(false);
     parent->dirtyBound();
 
     ModelInstanceMap models;
@@ -296,7 +530,7 @@ DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
     // get rid of the old matrix transforms.
     parent->removeChildren(0, parent->getNumChildren());
 
-	// This is the maximum size of the tbo 
+	// This is the maximum size of the tbo
 	int maxTBOSize = Registry::capabilities().getMaxTextureBufferSize();
 	// This is the total number of instances it can store
 	// We will iterate below. If the number of instances is larger than the buffer can store
@@ -304,29 +538,13 @@ DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
     int matrixSize = 4 * 4 * sizeof(float); // 4 vec4's.
     int maxTBOInstancesSize = maxTBOSize / matrixSize;
 
+    osgUtil::Optimizer optimizer;
+
     // For each model:
     for( ModelInstanceMap::iterator i = models.begin(); i != models.end(); ++i )
     {
         osg::Node*                  node      = i->first.get();
         std::vector<ModelInstance>& instances = i->second;
-
-        // calculate the overall bounding box for the model:
-        osg::ComputeBoundsVisitor cbv;
-        node->accept( cbv );
-        const osg::BoundingBox& nodeBox = cbv.getBoundingBox();
-
-        osg::BoundingBox bbox;
-        for( std::vector<ModelInstance>::iterator m = instances.begin(); m != instances.end(); ++m )
-        {
-            bbox.expandBy(nodeBox.corner(0) * m->matrix);
-            bbox.expandBy(nodeBox.corner(1) * m->matrix);
-            bbox.expandBy(nodeBox.corner(2) * m->matrix);
-            bbox.expandBy(nodeBox.corner(3) * m->matrix);
-            bbox.expandBy(nodeBox.corner(4) * m->matrix);
-            bbox.expandBy(nodeBox.corner(5) * m->matrix);
-            bbox.expandBy(nodeBox.corner(6) * m->matrix);
-            bbox.expandBy(nodeBox.corner(7) * m->matrix);
-        }
 
 		unsigned tboSize = 0;
 		unsigned numInstancesToStore = 0;
@@ -343,13 +561,6 @@ DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
 			tboSize = maxTBOInstancesSize;
 			numInstancesToStore = maxTBOInstancesSize;
 		}
-		
-        // Assign matrix vectors to the node, so the application can easily retrieve
-        // the original position data if necessary.
-        MatrixRefVector* nodeMats = new MatrixRefVector();
-        nodeMats->setName(TAG_MATRIX_VECTOR);
-        nodeMats->reserve(numInstancesToStore);
-        node->getOrCreateUserDataContainer()->addUserObject(nodeMats);
 
         // this group is simply a container for the uniform:
         osg::Group* instanceGroup = new osg::Group();
@@ -358,6 +569,9 @@ DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
         osg::Image* image = new osg::Image();
         image->setName("osgearth.drawinstanced.postex");
 		image->allocateImage( tboSize*4, 1, 1, GL_RGBA, GL_FLOAT );
+
+
+        std::vector< osg::Matrixf> matrices;
 
 		// could use PixelWriter but we know the format.
 		// Note: we are building a transposed matrix because it makes the decoding easier in the shader.
@@ -377,7 +591,7 @@ DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
 			}
 
 			// encode the ObjectID in the last column, which is always (0,0,0,1)
-			// in a standard scale/rot/trans matrix. We will reinstate it in the 
+			// in a standard scale/rot/trans matrix. We will reinstate it in the
 			// shader after extracting the object ID.
 			*ptr++ = (float)((i.objectID      ) & 0xff);
 			*ptr++ = (float)((i.objectID >>  8) & 0xff);
@@ -385,24 +599,37 @@ DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
 			*ptr++ = (float)((i.objectID >> 24) & 0xff);
 
 			// store them int the metadata as well
-			nodeMats->push_back(mat);
+            matrices.push_back(mat);
 		}
 
         // so the TBO will serialize properly.
         image->setWriteHint(osg::Image::STORE_INLINE);
 
         // Constuct the TBO:
-        osg::TextureBuffer* posTBO = new osg::TextureBuffer;
+        osg::TextureBuffer* posTBO = new osgEarth::TextureBuffer;
 		posTBO->setImage(image);
         posTBO->setInternalFormat( GL_RGBA32F_ARB );
-        posTBO->setUnRefImageDataAfterApply( true );
+        posTBO->setUnRefImageDataAfterApply( false );
+
+        // Make a higher level group to run the Optimizer on in case the node itself is a Transform
+        // as the FlattenStaticTransformsDuplicatingSharedSubgraphsVisitor doesn't work correctly when the node itself 
+        // is a Transform
+        osg::ref_ptr< osg::Group > grp = new osg::Group;
+        grp->addChild(node);
+
+        // Flatten any transforms in the node graph:
+        MakeTransformsStatic makeStatic;
+        grp->accept(makeStatic);
+
+        osgUtil::Optimizer::FlattenStaticTransformsDuplicatingSharedSubgraphsVisitor flatten;
+        grp->accept(flatten);
 
         // Convert the node's primitive sets to use "draw-instanced" rendering; at the
         // same time, assign our computed bounding box as the static bounds for all
         // geometries. (As DI's they cannot report bounds naturally.)
-        ConvertToDrawInstanced cdi(numInstancesToStore, bbox, true, posTBO, 0);
-        node->accept( cdi );
-        
+        ConvertToDrawInstanced cdi(numInstancesToStore, true, posTBO, 0);
+        grp->accept( cdi );
+
         // Bind the TBO sampler:
         osg::StateSet* stateset = instanceGroup->getOrCreateStateSet();
         stateset->setTextureAttribute(cdi.getTextureImageUnit(), posTBO);
@@ -412,7 +639,10 @@ DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
         ShaderGenerator::setIgnoreHint(posTBO, true);
 
 		// add the node as a child:
-        instanceGroup->addChild( node );
+        instanceGroup->addChild(grp);
+
+        MakeInstanceGeometryVisitor makeInstanced(matrices);
+        instanceGroup->accept(makeInstanced);
 
         parent->addChild( instanceGroup );
 
@@ -420,23 +650,4 @@ DrawInstanced::convertGraphToUseDrawInstanced( osg::Group* parent )
     }
 
     return true;
-}
-
-
-const DrawInstanced::MatrixRefVector*
-DrawInstanced::getMatrixVector(osg::Node* node)
-{
-    if ( !node )
-        return 0L;
-
-    osg::UserDataContainer* udc = node->getUserDataContainer();
-    if ( !udc )
-        return 0L;
-
-    osg::Object* obj = udc->getUserObject(TAG_MATRIX_VECTOR);
-    if ( !obj )
-        return 0L;
-
-    // cast is safe because of our unique tag
-    return static_cast<const MatrixRefVector*>( obj );
 }

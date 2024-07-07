@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
 * Copyright 2008-2014 Pelican Mapping
 * http://osgearth.org
 *
@@ -20,48 +20,60 @@
 #define OSGEARTH_REX_LOAD_TILE_DATA 1
 
 #include "Common"
-#include "Loader"
-#include "RenderBindings"
-#include "TileNode"
-#include "EngineContext"
-#include "TileRenderModel"
-#include <osgEarth/Progress>
+#include <osgEarth/TerrainTileModelFactory>
+#include <memory>
 
-namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
+namespace osgEarth {
+    class TerrainEngineNode;
+}
+
+namespace osgEarth { namespace REX
 {
-    class LoadTileData : public Loader::Request
+    using namespace osgEarth;
+
+    class TileNode;
+    class EngineContext;
+
+    /**
+     * Handles the loading of data of an individual tile node
+     */
+    class LoadTileDataOperation
     {
     public:
-        LoadTileData(TileNode* tilenode, EngineContext* factory);
+        LoadTileDataOperation(
+            TileNode* tilenode,
+            EngineContext* factory);
 
-        CreateTileModelFilter& filter() { return _filter; }
+        //! New tile data request for a subset of layers (in the manifest)
+        LoadTileDataOperation(
+            const CreateTileManifest& manifest,
+            TileNode* tilenode,
+            EngineContext* context);
 
+        virtual ~LoadTileDataOperation();
+
+        //! Whether to allow the request to cancel midstream. Default is true
         void setEnableCancelation(bool value) { _enableCancel = value; }
 
-    public: // Loader::Request
+        //! Dispatch the job.
+        bool dispatch(bool async = true);
 
-        /** Fetches the data for the tile node. */
-        void invoke();
+        //! Merge the results into the TileNode
+        bool merge();
 
-        /** Applies the fetched data to the tile node (scene-graph safe) */
-        void apply(const osg::FrameStamp*);
-
-        //! Creates a stateset containing GL compilable objects from the model
-        osg::StateSet* createStateSet() const;
-
-    protected:
+        using LoadResult= osg::ref_ptr<TerrainTileModel>;
+        Future<LoadResult> _result;
+        CreateTileManifest _manifest;
+        bool _enableCancel;
         osg::observer_ptr<TileNode> _tilenode;
         osg::observer_ptr<TerrainEngineNode> _engine;
-        osg::observer_ptr<EngineContext> _context;
-        osg::ref_ptr<TerrainTileModel> _dataModel;
-        TileRenderModel _renderModel;
-        CreateTileModelFilter _filter;
-        osg::observer_ptr< const Map > _map;
-        bool _enableCancel;
-
-        virtual ~LoadTileData() { }
+        std::string _name;
+        bool _dispatched;
+        bool _merged;
     };
 
-} } } // namespace osgEarth::Drivers::RexTerrainEngine
+    typedef std::shared_ptr<LoadTileDataOperation> LoadTileDataOperationPtr;
+
+} } // namespace osgEarth::REX
 
 #endif // OSGEARTH_REX_LOAD_TILE_DATA

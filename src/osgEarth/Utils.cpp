@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -17,9 +17,14 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>
  */
 #include <osgEarth/Utils>
+#include <osgEarth/Threading>
+#include <osgEarth/ImageUtils>
+#include <osgEarth/Metrics>
 #include <osgUtil/MeshOptimizers>
 
 using namespace osgEarth;
+using namespace osgEarth::Threading;
+using namespace osgEarth::Util;
 
 //------------------------------------------------------------------------
 
@@ -430,14 +435,14 @@ GeometryValidator::apply(osg::Geometry& geom)
 {
     if ( geom.getVertexArray() == 0L )
     {
-        OE_NOTICE << LC << "NULL vertex array!!\n";
+        OE_WARN << LC << "NULL vertex array!!" << std::endl;
         return;
     }
 
     unsigned numVerts = geom.getVertexArray()->getNumElements();
     if ( numVerts == 0 )
     {
-        OE_NOTICE << LC << "No verts!! name=" << geom.getName() << "\n";
+        OE_WARN << LC << "No verts!! name=" << geom.getName() <<  std::endl;
         return;
     }
 
@@ -453,25 +458,25 @@ GeometryValidator::apply(osg::Geometry& geom)
         {
             if ( a->getBinding() == a->BIND_OVERALL && a->getNumElements() != 1 )
             {
-                OE_NOTICE << LC << "Found an array with BIND_OVERALL and size <> 1\n";
+                OE_WARN << LC << "Found an array with BIND_OVERALL and size <> 1" << std::endl;
             }
             else if ( a->getBinding() == a->BIND_PER_VERTEX && a->getNumElements() != numVerts )
             {
-                OE_NOTICE << LC << "Found BIND_PER_VERTEX with wrong number of elements (expecting " << numVerts << "; found " << a->getNumElements() << ")\n";
+                OE_WARN << LC << a->className () << " : Found BIND_PER_VERTEX with wrong number of elements (expecting " << numVerts << "; found " << a->getNumElements() << ")" << std::endl;
             }
 
             _vbos.insert( a->getVertexBufferObject() );
         }
         else
         {
-            OE_NOTICE << LC << "Found a NULL array\n";
+            OE_WARN << LC << "Found a NULL array" << std::endl;
         }
 
     }
 
     if ( _vbos.size() != 1 )
     {
-        OE_NOTICE << LC << "Found a Geometry that uses more than one VBO (non-optimal sharing)\n";
+        OE_WARN << LC << "Found a Geometry that uses more than one VBO (non-optimal sharing)" << std::endl;
     }
 
     const osg::Geometry::PrimitiveSetList& plist = geom.getPrimitiveSetList();
@@ -485,17 +490,17 @@ GeometryValidator::apply(osg::Geometry& geom)
         osg::DrawArrays* da = dynamic_cast<osg::DrawArrays*>(pset);
         if ( da )
         {
-            if ( da->getFirst() >= numVerts )
+            if ( da->getFirst() >= (GLint)numVerts )
             {
-                OE_NOTICE << LC << "DrawArrays: first > numVerts\n";
+                OE_WARN << LC << "DrawArrays: first > numVerts" << std::endl;
             }
-            if ( da->getFirst()+da->getCount() > numVerts )
+            if ( da->getFirst()+da->getCount() > (GLint)numVerts )
             {
-                OE_NOTICE << LC << "DrawArrays: first/count out of bounds\n";
+                OE_WARN << LC << "DrawArrays: first/count out of bounds" << std::endl;
             }
             if ( da->getCount() < 1 )
             {
-                OE_NOTICE << LC << "DrawArrays: count is zero\n";
+                OE_WARN << LC << "DrawArrays: count is zero" << std::endl;
             }
         }
 
@@ -524,25 +529,25 @@ GeometryValidator::apply(osg::Geometry& geom)
 
         if ( pset->getNumIndices() == 0 )
         {
-            OE_NOTICE << LC << "Primset: num elements = 0; class=" << pset->className() << ", name=" << pset->getName() << "\n";
+            OE_WARN << LC << "Primset: num elements = 0; class=" << pset->className() << ", name=" << pset->getName() << "" << std::endl;
         }
         else if ( pset->getType() >= GL_TRIANGLES && pset->getNumIndices() < 3 )
         {
-            OE_NOTICE << LC << "Primset: not enough indicies for surface prim type\n";
+            OE_WARN << LC << "Primset: not enough indicies for surface prim type" << std::endl;
         }
         else if ( pset->getType() >= GL_LINE_STRIP && pset->getNumIndices() < 2 )
         {
-            OE_NOTICE << LC << "Primset: not enough indicies for linear prim type\n";
+            OE_WARN << LC << "Primset: not enough indicies for linear prim type" << std::endl;
         }
         else if ( isDe && pset->getType() == GL_LINES && pset->getNumIndices() % 2 != 0 )
         {
-            OE_NOTICE << LC << "Primset: non-even index count for GL_LINES\n";
+            OE_WARN << LC << "Primset: non-even index count for GL_LINES" << std::endl;
         }
     }
 
     if ( _ebos.size() != 1 )
     {
-        OE_NOTICE << LC << "Found a Geometry that uses more than one EBO (non-optimal sharing)\n";
+        OE_WARN << LC << "Found a Geometry that uses more than one EBO (non-optimal sharing)" << std::endl;
     }
 }
 
@@ -557,7 +562,7 @@ GeometryValidator::apply(osg::Group& group)
             apply( *geom );
             if ( geom->getVertexArray() == 0L )
             {
-                OE_NOTICE << "removing " << geom->getName() << " b/c of null vertex array\n";
+                OE_NOTICE << "removing " << geom->getName() << " b/c of null vertex array" << std::endl;
                 group.removeChild(geom);
                 --i;
             }
@@ -618,4 +623,155 @@ RenderBinUtils::getTotalNumRenderLeaves(osgUtil::RenderBin* bin)
     }
 
     return count;
+}
+
+
+CustomRenderLeaf::CustomRenderLeaf(osgUtil::RenderLeaf* leaf) : 
+    osgUtil::RenderLeaf(
+        leaf->_drawable,
+        leaf->_projection,
+        leaf->_modelview,
+        leaf->_depth,
+        leaf->_traversalOrderNumber)
+{
+    //nop
+}
+
+void
+CustomRenderLeaf::render(osg::RenderInfo& renderInfo, osgUtil::RenderLeaf* previous)
+{
+    // ALL CODE COPIED FROM OSG except for the DRAW OVERRIDE.
+
+    osg::State& state = *renderInfo.getState();
+
+    // don't draw this leaf if the abort rendering flag has been set.
+    if (state.getAbortRendering())
+    {
+        //cout << "early abort"<<endl;
+        return;
+    }
+
+    if (previous)
+    {
+
+        // apply matrices if required.
+        state.applyProjectionMatrix(_projection.get());
+        state.applyModelViewMatrix(_modelview.get());
+
+        // apply state if required.
+        osgUtil::StateGraph* prev_rg = previous->_parent;
+        osgUtil::StateGraph* prev_rg_parent = prev_rg->_parent;
+        osgUtil::StateGraph* rg = _parent;
+        if (prev_rg_parent != rg->_parent)
+        {
+            osgUtil::StateGraph::moveStateGraph(state, prev_rg_parent, rg->_parent);
+
+            // send state changes and matrix changes to OpenGL.
+            state.apply(rg->getStateSet());
+
+        }
+        else if (rg != prev_rg)
+        {
+
+            // send state changes and matrix changes to OpenGL.
+            state.apply(rg->getStateSet());
+
+        }
+
+        // if we are using osg::Program which requires OSG's generated uniforms to track
+        // modelview and projection matrices then apply them now.
+        if (state.getUseModelViewAndProjectionUniforms()) state.applyModelViewAndProjectionUniformsIfRequired();
+
+        // draw the drawable
+        //_drawable->draw(renderInfo);
+    }
+    else
+    {
+        // apply matrices if required.
+        state.applyProjectionMatrix(_projection.get());
+        state.applyModelViewMatrix(_modelview.get());
+
+        // apply state if required.
+        osgUtil::StateGraph::moveStateGraph(state, NULL, _parent->_parent);
+
+        state.apply(_parent->getStateSet());
+
+        // if we are using osg::Program which requires OSG's generated uniforms to track
+        // modelview and projection matrices then apply them now.
+        if (state.getUseModelViewAndProjectionUniforms()) state.applyModelViewAndProjectionUniformsIfRequired();
+
+        // draw the drawable
+        //_drawable->draw(renderInfo);
+    }
+
+    // Custom user draw function.
+    draw(state);
+
+    if (_dynamic)
+    {
+        state.decrementDynamicObjectCount();
+    }
+}
+
+//.....
+
+#ifdef WIN32
+#include <Windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+#elif defined(__GNUC__)
+#include <execinfo.h>
+#include <cstdlib>
+#include <cstring>
+#include <cxxabi.h>
+#endif
+
+CallStack::CallStack()
+{
+#ifdef WIN32
+    HANDLE process = GetCurrentProcess();
+    SymInitialize(process, NULL, TRUE);
+
+    void* stack[100];
+    WORD frames = CaptureStackBackTrace(0, 100, stack, NULL);
+
+    SYMBOL_INFO* symbol = (SYMBOL_INFO*)calloc(sizeof(SYMBOL_INFO) + 256 * sizeof(char), 1);
+    symbol->MaxNameLen = 255;
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+
+    for (int i = 0; i < frames; i++)
+    {
+        SymFromAddr(process, (DWORD64)(stack[i]), 0, symbol);
+        symbols.emplace_back(symbol->Name);
+    }
+
+    free(symbol);
+#else
+    auto trim = [](const char* in, std::string& out)
+        {
+            std::string temp(in);
+            auto start = temp.find_first_of('(');
+            auto end = temp.find_first_of('+', start);
+            out = temp.substr(start + 1, end - 1 - start);
+        };
+
+    void* stack[100];
+    int frames = backtrace(stack, 100);
+    char** bt = backtrace_symbols(stack, frames);
+    for (int i = 0; i < frames; ++i)
+    {
+        std::string buf;
+        int status = -1;
+        trim(bt[i], buf);
+        char* demangled = abi::__cxa_demangle(buf.c_str(), nullptr, nullptr, &status);
+        if (status == 0) {
+            buf = demangled;
+            free(demangled);
+        }
+        symbols.emplace_back(buf);
+        if (buf == "main")
+            break;
+    }
+    free(bt);
+#endif
 }

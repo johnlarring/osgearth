@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -57,14 +57,15 @@ GeoMath::distance(const osg::Vec3d& p1, const osg::Vec3d& p2, const SpatialRefer
 {
     if ( srs == 0L || srs->isProjected() )
     {
-        return (p2-p1).length();
+        double dx = p2.x() - p1.x(), dy = p2.y() - p1.y();
+        return sqrt(dx*dx + dy*dy);
     }
     else
     {
         return distance(
             osg::DegreesToRadians( p1.y() ), osg::DegreesToRadians( p1.x() ),
             osg::DegreesToRadians( p2.y() ), osg::DegreesToRadians( p2.x() ),
-            srs->getEllipsoid()->getRadiusEquator() );
+            srs->getEllipsoid().getRadiusEquator() );
     }
 }
 
@@ -84,8 +85,8 @@ GeoMath::greatCircleMinMaxLatitude(double lat1Rad, double lon1Rad,
                                    double lat2Rad, double lon2Rad,
                                    double& out_minLatRad, double& out_maxLatRad)
 {
-    out_minLatRad = std::min(lat1Rad, lat2Rad);
-    out_maxLatRad = std::max(lat1Rad, lat2Rad);
+    out_minLatRad = osg::minimum(lat1Rad, lat2Rad);
+    out_maxLatRad = osg::maximum(lat1Rad, lat2Rad);
 
     // apply some spherical trig
     // http://en.wikipedia.org/wiki/Spherical_trigonometry
@@ -102,20 +103,20 @@ GeoMath::greatCircleMinMaxLatitude(double lat1Rad, double lon1Rad,
 
     double B = osg::PI_2 - lat1Rad;                       // angle between p1 and the pole
     if ( a < osg::PI_2 && b < osg::PI_2 )
-        out_maxLatRad = std::max( out_maxLatRad, osg::PI_2 - asin(sin(B)*sin(a)) );
+        out_maxLatRad = osg::maximum( out_maxLatRad, osg::PI_2 - asin(sin(B)*sin(a)) );
     //out_maxLatRad = a < osg::PI_2 && b < osg::PI_2 ? 
     //    osg::PI_2 - asin( sin(B)*sin(a) ) : 
-    //    std::max(lat1Rad,lat2Rad);
+    //    osg::maximum(lat1Rad,lat2Rad);
 
     // flip over to the triangle formed by the south pole:
     a = osg::PI - a, b = osg::PI - b;
     B = osg::PI - B; //lat1Rad - (-osg::PI_2);
 
     if ( a < osg::PI_2 && b < osg::PI_2 )
-        out_minLatRad = std::min( out_minLatRad, -osg::PI_2 + asin(sin(B)*sin(a)) );
+        out_minLatRad = osg::minimum( out_minLatRad, -osg::PI_2 + asin(sin(B)*sin(a)) );
     //out_minLatRad = a < osg::PI_2 && b < osg::PI_2 ? 
     //    osg::PI_2 - asin( sin(B)*sin(a) ) :
-    //    std::min(lat1Rad,lat2Rad);
+    //    osg::minimum(lat1Rad,lat2Rad);
 
     //OE_INFO 
     //    << "a = " << osg::RadiansToDegrees(a)

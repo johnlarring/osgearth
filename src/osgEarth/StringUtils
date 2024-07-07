@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -31,15 +31,17 @@
 #include <locale>
 #include <iomanip>
 #include <map>
+#include <unordered_map>
 #include <set>
-#include <ctype.h>
+#include <cctype>
 
-namespace osgEarth
+namespace osgEarth { namespace Util
 {
     extern OSGEARTH_EXPORT const std::string EMPTY_STRING;
 
-    typedef std::vector<std::string> StringVector;
-    typedef std::set<std::string> StringSet;
+    using StringVector = std::vector<std::string>;
+    using StringSet = std::set<std::string>;
+    using StringTable = std::unordered_map<std::string, std::string>;
 
     /** Replaces all the instances of "pattern" with "replacement" in "in_out" */
     extern OSGEARTH_EXPORT std::string& replaceIn(
@@ -62,6 +64,10 @@ namespace osgEarth
      * Trims whitespace from the ends of a string; in-place modification on the string to reduce string copies.
      */
     extern OSGEARTH_EXPORT void trim2( std::string& str );
+
+    //! Removes leading and trailing whitespace, and replaces all other
+    //! whitespace with single spaces
+    extern OSGEARTH_EXPORT std::string trimAndCompress(const std::string& in);
 
     /**
      * True is "ref" starts with "pattern"
@@ -92,8 +98,21 @@ namespace osgEarth
     /**
      * Case-insensitive STL comparator
      */
-    struct OSGEARTH_EXPORT CIStringComp {
-        bool operator()(const std::string& lhs, const std::string& rhs) const;
+    inline bool ci_char_equals(char c1, char c2) {
+        return std::tolower(c1) == std::tolower(c2);
+    }
+    inline bool ci_equals(const std::string& lhs, const std::string& rhs) {
+        return (lhs.size() == rhs.size()) &&
+            std::equal(lhs.begin(), lhs.end(), rhs.begin(), ci_char_equals);
+    }
+    struct ci_string_less {
+        bool operator()(const std::string& lhs, const std::string& rhs) const {
+            for(size_t i=0; i<std::min(lhs.size(), rhs.size()); ++i) {
+                if (std::tolower(lhs[i]) < std::tolower(rhs[i])) return true;
+                if (std::tolower(lhs[i]) > std::tolower(rhs[i])) return false;
+            }
+            return lhs.size() < rhs.size();
+        }
     };
 
 
@@ -121,7 +140,7 @@ namespace osgEarth
     extern OSGEARTH_EXPORT std::string vec4fToHtmlColor( const osg::Vec4f& c );
 
     /** Makes a valid filename out of a string */
-    extern OSGEARTH_EXPORT std::string toLegalFileName( const std::string& input, bool allowSubdir=false );
+    extern OSGEARTH_EXPORT std::string toLegalFileName( const std::string& input, bool allowSubdir=false, const char* replacementChar=NULL);
 
     /** Generates a hashed integer for a string (poor man's MD5) */
     extern OSGEARTH_EXPORT unsigned hashString( const std::string& input );
@@ -137,7 +156,11 @@ namespace osgEarth
     /**
     * Gets a pretty printed version of the given size in MB.
     */
-    extern OSGEARTH_EXPORT std::string prettyPrintSize( double mb );
+    extern OSGEARTH_EXPORT std::string prettyPrintSize( double mb );  
+    
+    //! Extract the "i-th" token from a delimited string
+    extern OSGEARTH_EXPORT std::string getToken(const std::string& input, unsigned i, const std::string& delims=",");
+
 
     //------------------------------------------------------------------------
     // conversion templates
@@ -211,7 +234,6 @@ namespace osgEarth
     }
 
     // converts a primitive to a string
-    // TODO: precision??
     template<typename T> inline std::string
     toString(const T& value)
     {
@@ -281,12 +303,27 @@ namespace osgEarth
     class OSGEARTH_EXPORT StringTokenizer
     {
     public:
-        StringTokenizer( const std::string& delims =" \t\r\n", const std::string& quotes ="'\"" );
+        StringTokenizer( 
+            const std::string& delims =" \t\r\n", 
+            const std::string& quotes ="'\"" );
 
         StringTokenizer(
-            const std::string& input, StringVector& output,
-            const std::string& delims =" \t\r\n", const std::string& quotes ="'\"",
-            bool keepEmpties =true, bool trimTokens =true);
+            const std::string& input,
+            StringVector& output,
+            const std::string& delims =" \t\r\n", 
+            const std::string& quotes ="'\"",
+            bool keepEmpties =true, 
+            bool trimTokens =true);
+
+        StringTokenizer(
+            const std::string& input,
+            StringTable& output,
+            const std::string& delims = " \t\r\n",
+            const std::string& keypairseparators = "=",
+            const std::string& quotes = "'\"",
+            bool keepEmpties = true,
+            bool trimTokens = true);
+
 
         void tokenize( const std::string& input, StringVector& output ) const;
 
@@ -303,13 +340,20 @@ namespace osgEarth
         void addQuotes( const std::string& delims, bool keepInTokens =false );
 
     private:
-        typedef std::map<char,bool> TokenMap;
+        using TokenMap = std::map<char,bool>;
         TokenMap _delims;
         TokenMap _quotes;
         bool     _allowEmpties;
         bool     _trimTokens;
     };
+} }
+
+
+namespace osgEarth
+{
+    namespace Strings = osgEarth::Util;
 }
+
 
 #endif // OSGEARTH_STRING_UTILS_H
 

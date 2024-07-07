@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -21,16 +21,11 @@
 */
 
 #include <osg/Notify>
-#include <osgEarthDrivers/feature_ogr/OGRFeatureOptions>
-
-#include <osgEarthUtil/TFSPackager>
+#include <osgEarth/TFSPackager>
+#include <osgEarth/OGRFeatureSource>
 
 using namespace osgEarth;
-using namespace osgEarth::Util;
-using namespace osgEarth::Features;
-using namespace osgEarth::Drivers;
-using namespace osgEarth::Symbology;
-
+using namespace osgEarth::Contrib;
 
 int
 usage( const std::string& msg )
@@ -105,7 +100,7 @@ int main(int argc, char** argv)
     CropFilter::Method cropMethod = CropFilter::METHOD_CENTROID;
     if (arguments.read("--crop"))
     {
-        cropMethod = CropFilter::METHOD_CROPPING;
+        cropMethod = CropFilter::METHOD_CROP_TO_EXTENT;
     }
 
     std::string destSRS;
@@ -117,9 +112,9 @@ int main(int argc, char** argv)
     if (!grid.empty())
     {
         float gridSize;
-        Units units;
-        if ( Units::parse(grid, gridSize, units, Units::METERS) ) {
-             gridSizeMeters = Distance(gridSize, units).as(Units::METERS);
+        UnitsType units;
+        if (Units::parse(grid, gridSize, units, Units::METERS)) {
+            gridSizeMeters = Distance(gridSize, units).as(Units::METERS);
         }
     }
 
@@ -151,21 +146,12 @@ int main(int argc, char** argv)
         return usage( "Please provide a filename" );
     }
 
-    //Open the feature source
-    OGRFeatureOptions featureOpt;
-    featureOpt.url() = filename;
-
-    osg::ref_ptr< FeatureSource > features = FeatureSourceFactory::create( featureOpt );
-    if (!features.valid())
+    // Open the feature source
+    osg::ref_ptr<OGRFeatureSource> features = new OGRFeatureSource();
+    features->setURL(filename);
+    if (features->open().isError())
     {
-        OE_NOTICE << "Failed to open " << filename << std::endl;
-        return 1;
-    }
-
-    Status s = features->open();
-    if (s.isError())
-    {
-        OE_NOTICE << s.message() << ": " << filename << std::endl;
+        OE_NOTICE << "Failed to open " << filename << " : " << features->getStatus().message() << std::endl;
         return 1;
     }
 
@@ -191,7 +177,7 @@ int main(int argc, char** argv)
         ext = ext.transform(osgEarth::SpatialReference::create( destSRS ));
     }
 
-    if (bounds.isValid())
+    if (bounds.valid())
     {
         // If a custom bounds was specified use that instead.
         ext = GeoExtent(osgEarth::SpatialReference::create( destSRS ), bounds);

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -19,20 +19,25 @@
 #include "ViewpointsExtension"
 #include <osgEarth/Viewpoint>
 #include <osgEarth/XmlUtils>
-#include <osgEarthUtil/EarthManipulator>
+#include <osgEarth/EarthManipulator>
+#include <osgEarth/StringUtils>
 #include <osgViewer/View>
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
-using namespace osgEarth::Util::Controls;
 using namespace osgEarth::Viewpoints;
+
+#ifdef OSGEARTH_HAVE_CONTROLS_API
+using namespace osgEarth::Util::Controls;
+#endif
 
 #define LC "[ViewpointsExtension] "
 
 
-#define VP_MIN_DURATION      2.0     // minimum fly time.
-#define VP_METERS_PER_SECOND 2500.0  // fly speed
-#define VP_MAX_DURATION      2.0     // maximum fly time.
+#define VP_MIN_DURATION       2.0     // minimum fly time.
+#define VP_METERS_PER_SECOND  2500.0  // fly speed
+#define VP_MAX_DURATION       2.0     // maximum fly time.
+#define VP_DEFAULT_DELAY_TIME 2.0     // default when auto-flying between viewpoints
 
 namespace
 {
@@ -49,21 +54,47 @@ namespace
 
     struct ViewpointsHandler : public osgGA::GUIEventHandler
     {
-        ViewpointsHandler(const std::vector<Viewpoint>& viewpoints, float t)
-            : _viewpoints( viewpoints ), _t(t) { }
+        std::vector<Viewpoint> _viewpoints;
+        optional<Viewpoint>    _flyTo;
+        float                  _transitionTime = 0.0f;
+        float                  _autoRunDelay = 0.0f;
+        osg::Timer_t           _autoRunStartWaitTime;
+        int                    _autoRunIndex = 0;
+        int                    _homeIndex = -1;
+        int                    _count = 0;
+        bool                   _mapKeys = true;
+
+        ViewpointsHandler(const std::vector<Viewpoint>& viewpoints, float t, bool mapKeys)
+            : _viewpoints( viewpoints ), _transitionTime(t), _mapKeys(mapKeys)
+        {
+            _autoRunStartWaitTime = osg::Timer::instance()->tick();
+        }
 
         bool handle( const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa )
         {
-            if ( ea.getEventType() == ea.KEYDOWN )
+            if (_count == 0 && _homeIndex >= 0 && _homeIndex < _viewpoints.size())
             {
-                if ( !_viewpoints.empty() )
+                EarthManipulator* manip = getManip(aa);
+                if (manip)
+                {
+                    flyToViewpoint(manip, _viewpoints[_homeIndex], _transitionTime);
+                    ++_count;
+                }
+            }
+
+            if (ea.getHandled())
+                return false;
+
+            if ( _mapKeys && ea.getEventType() == ea.KEYDOWN )
+            {
+                if ( !_viewpoints.empty() && _autoRunDelay <= 0.0f )
                 {
                     int index = (int)ea.getKey() - (int)'1';
                     if ( index >= 0 && index < (int)_viewpoints.size() )
                     {
                         EarthManipulator* manip = getManip(aa);
                         if ( manip )
-                            flyToViewpoint( manip, _viewpoints[index], _t );
+                            flyToViewpoint( manip, _viewpoints[index], _transitionTime );
                     }
                 }
                 if ( ea.getKey() == 'v' )
@@ -83,12 +114,29 @@ namespace
                 aa.requestRedraw();
             }
 
-            else if ( ea.getEventType() == ea.FRAME && _flyTo.isSet() )
+            else if ( ea.getEventType() == ea.FRAME && _viewpoints.size() > 0 )
             {
-                EarthManipulator* manip = getManip(aa);
-                if ( manip )
-                    flyToViewpoint(manip, *_flyTo, _t);
-                _flyTo.unset();
+                if (_flyTo.isSet())
+                {
+                    EarthManipulator* manip = getManip(aa);
+                    if ( manip )
+                        flyToViewpoint(manip, *_flyTo, _transitionTime);
+                    _flyTo.unset();
+                }
+
+                else if (_autoRunDelay > 0.0)
+                {
+                    osg::Timer_t now = osg::Timer::instance()->tick();
+                    float dt = osg::Timer::instance()->delta_s(_autoRunStartWaitTime, now);
+
+                    //OE_WARN << "now="<<now << ", t+auto=" << ((_transitionTime + _autoRunStartWaitTime)) << ",dt=" << now - (_transitionTime + _autoRunStartWaitTime) << ", delay="<<_autoRunDelay<<std::endl;
+                    if (dt > (_transitionTime + _autoRunDelay))
+                    {
+                        int i = (_autoRunIndex++ % _viewpoints.size());
+                        _flyTo = _viewpoints[i];
+                        _autoRunStartWaitTime = now;
+                    }
+                }
             }
 
             return false;
@@ -100,12 +148,14 @@ namespace
             return view ? dynamic_cast<EarthManipulator*>(view->getCameraManipulator()) : 0L;
         }
 
-        std::vector<Viewpoint> _viewpoints;
-        optional<Viewpoint>    _flyTo;
-        float                  _t;
+        void setAutoRunDelayTime(float t)
+        {
+            _autoRunDelay = t;
+        }
     };
 
 
+#ifdef OSGEARTH_HAVE_CONTROLS_API
     // flies to a viewpoint in response to control event (click)
     struct ClickViewpointHandler : public ControlEventHandler
     {
@@ -152,6 +202,7 @@ namespace
 
         return grid;
     }
+#endif 
 }
 
 //.........................................................................
@@ -168,6 +219,8 @@ ConfigOptions( options )
     // backwards-compatibility: read viewpoints at the top level???
     const Config& viewpointsConf = options.getConfig();
     float t = viewpointsConf.value("time", VP_MAX_DURATION);
+    int home = viewpointsConf.value("home", (int)-1);
+    bool mapKeys = viewpointsConf.value("map_keys", true) == true;
 
     std::vector<Viewpoint> viewpoints;
 
@@ -182,7 +235,16 @@ ConfigOptions( options )
 
     OE_INFO << LC << "Read " << viewpoints.size() << " viewpoints\n";
 
-    _handler = new ViewpointsHandler(viewpoints, t);
+    ViewpointsHandler* handler = new ViewpointsHandler(viewpoints, t, mapKeys);
+    handler->_homeIndex = home;
+
+    if (viewpointsConf.hasValue("autorun"))
+    {
+        float t = osgEarth::as<float>(viewpointsConf.value("autorun"), VP_DEFAULT_DELAY_TIME);
+        handler->setAutoRunDelayTime(t);
+    }
+
+    _handler = handler;
 }
 
 ViewpointsExtension::~ViewpointsExtension()
@@ -210,7 +272,6 @@ ViewpointsExtension::connect(osg::View* view)
 bool
 ViewpointsExtension::disconnect(osg::View* view)
 {
-    //TODO: remove the event handler
     osgViewer::View* v = dynamic_cast<osgViewer::View*>(view);
     if ( v && _handler.valid() )
     {
@@ -219,10 +280,11 @@ ViewpointsExtension::disconnect(osg::View* view)
     return true;
 }
 
+
+#ifdef OSGEARTH_HAVE_CONTROLS_API
 bool
 ViewpointsExtension::connect(Control* control)
 {
-    //TODO add a UI.
     Container* container = dynamic_cast<Container*>(control);
     if ( container )
     {
@@ -243,3 +305,4 @@ ViewpointsExtension::disconnect(Control* control)
     // TODO: remove the UI
     return true;
 }
+#endif

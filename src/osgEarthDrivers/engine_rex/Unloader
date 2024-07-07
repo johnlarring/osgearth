@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
  * Copyright 2008-2014 Pelican Mapping
  * http://osgearth.org
  *
@@ -20,60 +20,39 @@
 #define OSGEARTH_REX_UNLOADER 1
 
 #include "Common"
-
-#include <osgEarth/ThreadingUtils>
-#include <osgEarth/TileKey>
-#include <osgEarth/ResourceReleaser>
-
+#include "TileNode"
+#include <osgEarth/FrameClock>
 #include <osg/Group>
 
 
-namespace osgEarth { namespace Drivers { namespace RexTerrainEngine
+namespace osgEarth { namespace REX
 {
-    class TileNodeRegistry; // for UnloaderGroup
-
-
-    /**
-     * Pure interface class for a tile unloader. The Tile Unloader is 
-     * responsible for removing unused tiles from the scene graph and
-     * releasing any GL resources associated with them.
-     */
-    class Unloader
-    {
-    public:
-        virtual void unloadChildren(const std::vector<TileKey>& keys) =0;
-    };
+    class TileNodeRegistry;
 
     /**
      * Group-based tile unloader.
      */
-    class UnloaderGroup : public osg::Group, public Unloader
+    class UnloaderGroup : public osg::Group
     {
     public:
-        UnloaderGroup(TileNodeRegistry* tiles);
+        //! Construct an unloader for a registry
+        UnloaderGroup(TileNodeRegistry* tiles, const TerrainOptionsAPI& options);
 
-        /** Sets the key count at which unloading will begin */
-        void setThreshold(int t) { _threshold = t; }
-
-        /** Service that will release GL objects on unloaded nodes. */
-        void setReleaser(ResourceReleaser* releaser) { _releaser = releaser; }
-
-    public: // Unloader
-
-        void unloadChildren(const std::vector<TileKey>& keys);
+        //! Set the frame clock to use
+        void setFrameClock(const FrameClock* value) { _clock = value; }
 
     public: // osg::Node
-        void traverse(osg::NodeVisitor& nv);
+        void traverse(osg::NodeVisitor& nv) override;
 
     protected:
-        int                            _threshold;
-        std::set<TileKey>              _parentKeys;
-        TileNodeRegistry*              _tiles;
-        osg::ref_ptr<ResourceReleaser> _releaser;
-        mutable Threading::Mutex       _mutex;
+        TerrainOptionsAPI _options;
+        TileNodeRegistry* _tiles;
+        std::vector<osg::observer_ptr<TileNode> > _deadpool;
+        unsigned _frameLastUpdated;
+        const FrameClock* _clock;
     };
 
-} } } // namespace osgEarth::Drivers::RexTerrainEngine
+} } // namespace osgEarth::REX
 
 
 #endif // OSGEARTH_REX_UNLOADER

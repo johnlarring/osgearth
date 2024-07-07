@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -24,7 +24,7 @@
 #include <osgDB/Archive>
 #include <osgEarth/Containers>
 #include <osgEarth/Registry>
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
 
 #include "KMLOptions"
 #include "KMLReader"
@@ -33,7 +33,6 @@
 #define LC "[ReaderWriterKML] "
 
 using namespace osgEarth;
-using namespace osgEarth::Drivers;
 using namespace osgEarth_kml;
 
 //---------------------------------------------------------------------------
@@ -50,17 +49,17 @@ struct ReaderWriterKML : public osgDB::ReaderWriter
         //osgDB::Registry::instance()->addFileExtensionAlias("kmz", "zip"); 
     }
 
-    osgDB::ReaderWriter::ReadResult readObject(const std::string& url, const osgDB::Options* options) const
+    osgDB::ReaderWriter::ReadResult readObject(const std::string& url, const osgDB::Options* options) const override
     {
         return readNode( url, options );
     }
 
-    osgDB::ReaderWriter::ReadResult readObject(std::istream& in, const osgDB::Options* dbOptions ) const
+    osgDB::ReaderWriter::ReadResult readObject(std::istream& in, const osgDB::Options* dbOptions ) const override
     {
         return readNode(in, dbOptions);
     }
 
-    osgDB::ReaderWriter::ReadResult readNode(const std::string& url, const osgDB::Options* dbOptions) const
+    osgDB::ReaderWriter::ReadResult readNode(const std::string& url, const osgDB::Options* dbOptions) const override
     {
         std::string ext = osgDB::getLowerCaseFileExtension(url);
         if ( !acceptsExtension(ext) )
@@ -74,26 +73,22 @@ struct ReaderWriterKML : public osgDB::ReaderWriter
         else
         {
             // propagate the source URI along to the stream reader
+            OE_INFO << LC << "Reading KML from " << url << std::endl;
             osg::ref_ptr<osgDB::Options> myOptions = Registry::instance()->cloneOrCreateOptions(dbOptions);
             URIContext(url).store( myOptions.get() );
             return readNode( URIStream(url), myOptions.get() );
         }
     }
 
-    osgDB::ReaderWriter::ReadResult readNode(std::istream& in, const osgDB::Options* options ) const
+    osgDB::ReaderWriter::ReadResult readNode(std::istream& in, const osgDB::Options* options ) const override
     {
-        if ( !options )
-            return ReadResult("Missing required MapNode option");
-
-        // this plugin requires that you pass in a MapNode* in options.
+        // this plugin can receive an optional MapNode* in options.
         MapNode* mapNode = const_cast<MapNode*>(
             static_cast<const MapNode*>( options->getPluginData("osgEarth::MapNode")) );
-        if ( !mapNode )
-            return ReadResult("Missing required MapNode option");
 
         // grab the KMLOptions if present
-        const KMLOptions* kmlOptions =
-            static_cast<const KMLOptions*>(options->getPluginData("osgEarth::KMLOptions") );
+        const KML::KMLOptions* kmlOptions =
+            static_cast<const KML::KMLOptions*>(options->getPluginData("osgEarth::KMLOptions") );
 
         // fire up a KML reader and parse the data.
         KMLReader reader( mapNode, kmlOptions );
@@ -101,7 +96,7 @@ struct ReaderWriterKML : public osgDB::ReaderWriter
         return ReadResult(node);
     }
 
-    osgDB::ReaderWriter::ReadResult openArchive(const std::string& url, ArchiveStatus status, unsigned blockSizeHint, const osgDB::Options* options =0L) const
+    osgDB::ReaderWriter::ReadResult openArchive(const std::string& url, ArchiveStatus status, unsigned blockSizeHint, const osgDB::Options* options =0L) const override
     {
         if ( osgDB::getLowerCaseFileExtension(url) == "kmz" )
         {

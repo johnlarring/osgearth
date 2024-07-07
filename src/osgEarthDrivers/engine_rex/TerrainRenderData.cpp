@@ -1,5 +1,6 @@
+
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
  * Copyright 2008-2014 Pelican Mapping
  * http://osgearth.org
  *
@@ -19,60 +20,78 @@
 #include "TerrainRenderData"
 #include "TileNode"
 #include "SurfaceNode"
-#include <osgEarth/ClampableNode>
+#include <osgEarth/CameraUtils>
 
-using namespace osgEarth::Drivers::RexTerrainEngine;
+using namespace osgEarth::REX;
 
 #undef  LC
 #define LC "[TerrainRenderData] "
 
 
-void
+unsigned
 TerrainRenderData::sortDrawCommands()
 {
-    for (LayerDrawableList::iterator i = _layerList.begin(); i != _layerList.end(); ++i)
+    unsigned total = 0;
+    for(auto layer : _layerList)
     {
-        i->get()->_tiles.sort();
+        //TODO: review and benchmark list vs. vector vs. unsorted here.
+        DrawTileCommands& tiles = layer->_tiles;
+        std::sort(tiles.begin(), tiles.end());
+        total += tiles.size();
+
+        // re-sequence them after sorting
+        int seq = 0;
+        for (auto& tile : tiles)
+            tile._sequence = seq++;
     }
+    return total;
 }
 
 void
-TerrainRenderData::setup(const Map* map,
-                         const RenderBindings& bindings,
-                         unsigned frameNum,
-                         osgUtil::CullVisitor* cv)
+TerrainRenderData::reset(
+    const Map* map,
+    const RenderBindings& bindings,
+    unsigned frameNum,
+    PersistentData& persistent,
+    osgUtil::CullVisitor* cv,
+    EngineContext* context)
 {
     _bindings = &bindings;
+    _persistent = &persistent;
+    _context = context;
 
     // Create a new State object to track sampler and uniform settings
-    _drawState = new DrawState();
-    _drawState->_frame = frameNum;
+    _drawState = DrawState::create();
     _drawState->_bindings = &bindings;
-    
+
+    _layersByUID.clear();
+    _layerList.clear();
+    _patchLayers.clear();
+
     // Is this a depth camera? Because if it is, we don't need any color layers.
     const osg::Camera* cam = cv->getCurrentCamera();
-    bool isDepthCamera = ClampableNode::isDepthCamera(cam);
+    bool isDepthCamera = CameraUtils::isDepthCamera(cam);
 
     // Make a drawable for each rendering pass (i.e. each render-able map layer).
     LayerVector layers;
     map->getLayers(layers);
 
-    for (LayerVector::const_iterator i = layers.begin(); i != layers.end(); ++i)
+    for (auto& layer : layers)
     {
-        Layer* layer = i->get();
-        if (layer->getEnabled())
+        if (layer->isOpen())
         {
             bool render =
-                (layer->getRenderType() == Layer::RENDERTYPE_TERRAIN_SURFACE) || // && !isDepthCamera) ||
+                (layer->getRenderType() == Layer::RENDERTYPE_TERRAIN_SURFACE) ||
                 (layer->getRenderType() == Layer::RENDERTYPE_TERRAIN_PATCH);
 
             if ( render )
             {
                 // If this is an image layer, check the enabled/visible states.
-                VisibleLayer* visLayer = dynamic_cast<VisibleLayer*>(layer);
+                VisibleLayer* visLayer = dynamic_cast<VisibleLayer*>(layer.get());
                 if (visLayer)
                 {
-                    render = visLayer->getVisible();
+                    // Check the visibility flag as well as the cull mask
+                    render = visLayer->getVisible() && ((cv->getTraversalMask() & visLayer->getMask()) != 0);
                 }
 
                 if (render)
@@ -92,12 +111,12 @@ TerrainRenderData::setup(const Map* map,
 
                     else // if (layer->getRenderType() == Layer::RENDERTYPE_TERRAIN_PATCH)
                     {
-                        PatchLayer* patchLayer = static_cast<PatchLayer*>(layer); // asumption!
+                        PatchLayer* patchLayer = static_cast<PatchLayer*>(layer.get()); // asumption!
 
-                        if (patchLayer->getAcceptCallback() != 0L &&
+                        if (patchLayer->getAcceptCallback() != nullptr &&
                             patchLayer->getAcceptCallback()->acceptLayer(*cv, cv->getCurrentCamera()))
                         {
-                            patchLayers().push_back(dynamic_cast<PatchLayer*>(layer));
+                            patchLayers().push_back(dynamic_cast<PatchLayer*>(layer.get()));
                             addLayerDrawable(layer);
                         }
                     }
@@ -106,45 +125,65 @@ TerrainRenderData::setup(const Map* map,
         }
     }
 
-    // Include a "blank" layer for missing data.
-    LayerDrawable* blank = addLayerDrawable(0L);
-}
-
-namespace
-{
-    struct DebugCallback : public osg::Drawable::DrawCallback
-    {
-        std::string _s;
-        DebugCallback(const std::string& s) : _s(s) { }
-        void drawImplementation(osg::RenderInfo& ri, const osg::Drawable* d) const {
-            OE_WARN << "  Drawing Layer: " << _s << std::endl;
-            d->drawImplementation(ri);
-        }
-
-    };
+    // Include a "blank" layer for missing data. We should only need this if
+    // no layers get rendered at all.
+    addLayerDrawable(nullptr);
 }
 
 LayerDrawable*
-TerrainRenderData::addLayerDrawable(const Layer* layer)
+TerrainRenderData::addLayerDrawable(
+    const Layer* layer)
 {
-    LayerDrawable* drawable = new LayerDrawable();
-    drawable->_drawOrder = _layerList.size();
-    _layerList.push_back(drawable);
+    LayerDrawable* drawable = nullptr;
+    bool isNew = false;
 
-    drawable->_drawState = _drawState.get();
-
-    if (layer)
+    if (GLUtils::useNVGL())
     {
-        _layerMap[layer->getUID()] = drawable;
-        drawable->_layer = layer;
-        drawable->_visibleLayer = dynamic_cast<const VisibleLayer*>(layer);
-        drawable->_imageLayer = dynamic_cast<const ImageLayer*>(layer);
-        drawable->setStateSet(layer->getStateSet());
-        drawable->_renderType = layer->getRenderType();
+        osg::ref_ptr<LayerDrawable>& obj = _persistent->_drawables[layer];
+        if (!obj.valid())
+        {
+            obj = new LayerDrawableNVGL();
+            isNew = true;
+        }
+        drawable = obj.get();
     }
     else
     {
-        _layerMap[-1] = drawable;
+        drawable = new LayerDrawableGL3();
+        isNew = true;
+    }
+
+    if (isNew)
+    {
+        drawable->_context = _context;
+        drawable->_layer = layer;
+        drawable->_visibleLayer = dynamic_cast<const VisibleLayer*>(layer);
+        drawable->_imageLayer = dynamic_cast<const ImageLayer*>(layer);
+        drawable->_patchLayer = dynamic_cast<const PatchLayer*>(layer);
+
+        if (layer)
+        {
+            drawable->setName(layer->getName());
+            drawable->setStateSet(layer->getStateSet());
+            drawable->_renderType = layer->getRenderType();
+        }
+    }
+
+    // reset state:
+    drawable->_tiles.clear();
+    drawable->_clearOsgState = false;
+    drawable->_drawState = _drawState;
+    drawable->dirtyBound();
+    drawable->_drawOrder = _layerList.size();
+    _layerList.push_back(drawable); // ref taken
+    
+    if (layer)
+    {
+        _layersByUID[layer->getUID()] = drawable;
+    }
+    else
+    {
+        _layersByUID[-1] = drawable;
     }
 
     return drawable;

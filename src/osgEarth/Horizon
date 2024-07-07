@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -42,18 +42,18 @@ namespace osgEarth
 
         // Retrieve a Horizon object from the NodeVisitor. Returns NULL
         // if this operation is not supported.
-        static Horizon* get(osg::NodeVisitor& nv);
+        //static Horizon* get(osg::NodeVisitor& nv);
 
         // Stores this object in the NodeVisitor. Returns false if the
         // operation is not supported.
-        bool put(osg::NodeVisitor& nv);
+        //bool put(osg::NodeVisitor& nv);
 
     public:
         /** Construct a horizon using a default WGS84 ellipsoid model. */
         Horizon();
 
         /** Construct a horizon providing the ellipsoid model. */
-        Horizon(const osg::EllipsoidModel& ellipsoid);
+        Horizon(const Ellipsoid& ellipsoid);
 
         /** Construct a horizon from a spatial reference. */
         Horizon(const SpatialReference* srs);
@@ -64,7 +64,7 @@ namespace osgEarth
         /**
          * Ellipsoid model to use for occlusion testing
          */
-        void setEllipsoid(const osg::EllipsoidModel& ellipsoid);
+        void setEllipsoid(const Ellipsoid& ellipsoid);
 
         /**
          * Set the minimum allowable height-above-ellipsoid to consider when doing
@@ -78,6 +78,7 @@ namespace osgEarth
          * Returns true if the value changed; false if it was the same
          */
         bool setEye(const osg::Vec3d& eyeECEF);
+        const osg::Vec3d& getEye() const { return _eye; }
         
         /**
          * Whether a point is visible over the horizon.
@@ -123,7 +124,7 @@ namespace osgEarth
 
         virtual ~Horizon() { }
 
-        osg::EllipsoidModel _em;
+        Ellipsoid _em;
 
         bool       _valid;
         osg::Vec3d _eye;
@@ -174,11 +175,13 @@ namespace osgEarth
         const osg::observer_ptr<osg::Node>& getProxyNode() const { return _proxy; }
 
         /**
-         * Horizon to cull againts
+         * Custom ellipsoid to cull against.
+         * Normally this object will automatically detect the active ellipsoid
+         * from the NodeVisitor, but if you want to use a custom one you 
+         * can do so here.
          */
-        void setHorizon(Horizon* horizon) { _horizonProto = horizon; }
-        Horizon* getHorizon() { return _horizonProto.get(); }
-        const Horizon* getHorizon() const { return _horizonProto.get(); }
+        void setEllipsoid(const Ellipsoid& em);
+        const Ellipsoid& getEllipsoid() const { return _customEllipsoid; }
 
     public: // osg::NodeCallback
         void operator()(osg::Node* node, osg::NodeVisitor* nv);
@@ -191,7 +194,8 @@ namespace osgEarth
     private:
         bool _centerOnly;
         bool _enabled;
-        osg::ref_ptr<Horizon> _horizonProto;
+        Ellipsoid _customEllipsoid;
+        bool _customEllipsoidSet;
         osg::observer_ptr<osg::Node> _proxy;
     };
 

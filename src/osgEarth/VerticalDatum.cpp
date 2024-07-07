@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -18,10 +18,11 @@
  */
 
 #include <osgEarth/VerticalDatum>
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
 #include <osgEarth/GeoData>
 
 #include <osgDB/ReadFile>
+#include <stdlib.h>
 
 using namespace osgEarth;
 
@@ -33,16 +34,30 @@ using namespace osgEarth;
 namespace
 {
     typedef std::map<std::string, osg::ref_ptr<VerticalDatum> > VDatumCache;
-    VDatumCache      _vdatumCache;
-    Threading::Mutex _vdataCacheMutex;
+    VDatumCache _vdatumCache;
+    std::mutex _vdataCacheMutex;
+    bool _vdatumWarning = false;
 } 
 
 VerticalDatum*
 VerticalDatum::get( const std::string& initString )
 {
-    VerticalDatum* result = 0L;
+    VerticalDatum* result = nullptr;
 
-    Threading::ScopedMutexLock exclusive(_vdataCacheMutex);
+    if (initString.empty())
+        return result;
+
+    std::lock_guard<std::mutex> exclusive(_vdataCacheMutex);
+
+    if (::getenv("OSGEARTH_IGNORE_VERTICAL_DATUMS"))
+    {
+        if (!_vdatumWarning)
+        {
+            OE_WARN << LC << "WARNING *** Vertical datums have been deactivated; elevation values may be wrong!" << std::endl;
+            _vdatumWarning = true;
+        }
+        return nullptr;
+    }
 
     std::string s = toLower( initString );
     VDatumCache::const_iterator i = _vdatumCache.find( s );
@@ -53,7 +68,7 @@ VerticalDatum::get( const std::string& initString )
 
     if ( !result )
     {
-        OE_INFO << LC << "Initializing vertical datum: " << initString << std::endl;
+        OE_DEBUG << LC << "Initializing vertical datum: " << initString << std::endl;
         result = VerticalDatumFactory::create( initString );
         if ( result )
             _vdatumCache[s] = result;
@@ -65,21 +80,21 @@ VerticalDatum::get( const std::string& initString )
 // --------------------------------------------------------------------------
 
 VerticalDatum::VerticalDatum(const std::string& name,
-                             const std::string& initString,
-                             Geoid*             geoid ) :
-_name      ( name ),
-_initString( initString ),
-_geoid     ( geoid ),
-_units     ( Units::METERS )
+    const std::string& initString,
+    Geoid* geoid) :
+    _name(name),
+    _initString(initString),
+    _geoid(geoid),
+    _units(Units::METERS)
 {
-    if ( _geoid.valid() )
+    if (_geoid.valid())
         _units = _geoid->getUnits();
 }
 
-VerticalDatum::VerticalDatum( const Units& units ) :
-_name      ( units.getName() ),
-_initString( units.getName() ),
-_units     ( units )
+VerticalDatum::VerticalDatum(const UnitsType& units) :
+    _name(units.getName()),
+    _initString(units.getName()),
+    _units(units)
 {
     //nop
 }
@@ -99,8 +114,8 @@ VerticalDatum::transform(const VerticalDatum* from,
         in_out_z = from->msl2hae( lat_deg, lon_deg, in_out_z );
     }
 
-    Units fromUnits = from ? from->getUnits() : Units::METERS;
-    Units toUnits = to ? to->getUnits() : Units::METERS;
+    auto fromUnits = from ? from->getUnits() : Units::METERS;
+    auto toUnits = to ? to->getUnits() : Units::METERS;
 
     in_out_z = fromUnits.convertTo(toUnits, in_out_z);
 
@@ -202,8 +217,6 @@ VerticalDatum::isEquivalentTo( const VerticalDatum* rhs ) const
     if ( _geoid.valid() && !_geoid->isEquivalentTo( *rhs->_geoid.get() ) )
         return false;
 
-    //TODO - add comparisons as necessary
-
     return true;
 }
 
@@ -218,12 +231,17 @@ VerticalDatumFactory::create( const std::string& init )
 {
     osg::ref_ptr<VerticalDatum> datum;
 
-    std::string driverExt = Stringify() << ".osgearth_vdatum_" << init;
-    osg::ref_ptr<osg::Object> object = osgDB::readRefObjectFile( driverExt );
-    datum = dynamic_cast<VerticalDatum*>( object.release() );
-    if ( !datum )
+    std::string driverExt = "osgearth_vdatum_" + init;
+    auto rw = osgDB::Registry::instance()->getReaderWriterForExtension(driverExt);
+    if (rw)
     {
-        OE_WARN << "WARNING: Failed to load Vertical Datum driver for \"" << init << "\"" << std::endl;
+        auto rr = rw->readObject("."+driverExt, nullptr);
+        osg::ref_ptr<osg::Object> object = rr.getObject();
+        datum = dynamic_cast<VerticalDatum*>(object.release());
+        if (!datum)
+        {
+            OE_WARN << "WARNING: Failed to load Vertical Datum driver for \"" << init << "\"" << std::endl;
+        }
     }
 
     return datum.release();

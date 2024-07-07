@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -25,93 +25,105 @@
 
 #include <osgEarth/Common>
 #include <osgEarth/Map>
-#include <osgEarth/MapNodeOptions>
 #include <osgEarth/Extension>
+#include <osgEarth/TerrainOptions>
+
+namespace osg {
+    class View;
+}
 
 namespace osgEarth
 {
-    class OverlayDecorator;
+    class Registry;
+}
+
+namespace osgEarth
+{
     class Terrain;
     class TerrainEngineNode;
-    class MapNodeCullData;
     class SpatialReference;
-    class ResourceReleaser;
-    class DrapingManager;
-    class ClampingManager;
+    class DrapableNode;
+    class ClampableNode;
+
+    namespace Util
+    {
+        class DrapingManager;
+        class ClampingManager;
+        class DrapingTechnique;
+        class ClampingTechnique;
+    }
 
     /**
-     * OSG Node that forms the root of an osgEarth map. This node is a "view" component
-     * that renders data from a "Map" data model.
+     * OSG Node that forms the root of an osgEarth map.
+     * This node is a "view" component that renders data from a "Map" data model.
      */
     class OSGEARTH_EXPORT MapNode : public osg::Group
     {
-    public:
-        /**
-         * Attempts to load a MapNode from a ".earth" file in the arguments list
-         */
-        static MapNode* load(
-            class osg::ArgumentParser& arguments);
+    public: // serialization data
+        class OSGEARTH_EXPORT Options : public ConfigOptions {
+        public:
+            META_ConfigOptions(osgEarth, Options, ConfigOptions);
+            OE_OPTION(int, drapingRenderBinNumber, 1);
+            OE_OPTION(bool, enableLighting, true);
+            OE_OPTION(bool, overlayBlending, true);
+            OE_OPTION(bool, overlayMipMapping, false);
+            OE_OPTION(bool, useCascadeDraping, false);
+            OE_OPTION(float, overlayResolutionRatio, 3.0f);
+            OE_OPTION(float, screenSpaceError, 25.0f);
+            OE_OPTION(unsigned, overlayTextureSize, 4096);
+            OE_OPTION(std::string, overlayBlendingSource, "alpha");
+            OE_OPTION(TerrainOptions, terrain);
+            OE_OPTION(ProxySettings, proxySettings);
+            virtual Config getConfig() const;
+        private:
+            void fromConfig(const Config& conf);
+        };
 
-        /**
-         * Attempts to load a MapNode from an ".earth" file, with a set of default
-         * map and terrain options.
-         */
+    public: // static loaders
+
+        //! Loads a MapNode form a ".earth" file in the arguemnts list
+        static MapNode* load(class osg::ArgumentParser& arguments);
+
+        //! Loads a MapNode from a ".earth" file in the arguments list
         static MapNode* load(
             class osg::ArgumentParser& arguments,
-            const MapNodeOptions&      defaultOptions);
+            const Options& options);
 
-    public:
-        /**
-         * Creates an empty map node.
-         */
+    public: // constructors
+
+        //! Creates an empty map node (with a default empty Map).
         MapNode();
 
-        /**
-         * Creates an empty map node.
-         * 
-         * @param options
-         *      Tile creation and rendering properties
-         */
-        MapNode( const MapNodeOptions& options );
+        //! Creates an empty map node with some intialization options
+        MapNode(const Options& options);
 
-        /**
-         * Creates a new map node.
-         *
-         * @param map
-         *      Map data that this map node will render.
-         */
-        MapNode( Map* map );
+        //! Creates a map node that will render the given Map.
+        MapNode(Map* map);
 
-        /**
-         * Creates a new map node.
-         *
-         * @param map
-         *      Map data that this map node will render.
-         * @param options
-         *      Tile creation and rendering properties
-         */
-        MapNode( Map* map, const MapNodeOptions& options );
+        //! Creates a map node that will render the given Map.
+        MapNode(Map* map, const Options& options);
 
     public:
 
-        virtual const char* libraryName() const { return "osgEarth"; }
-        virtual const char* className() const { return "MapNode"; }
-
-        /**
-         * Gets the Map that this MapNode is rendering.
-         */
+        //! Map this node is rendering.
         Map* getMap();
         const Map* getMap() const;
 
-        /**
-         * Gets the spatial reference system of the underlying map.
-         * Convenience function.
-         */
+        //! Screen-space error for geometry level of detail
+        void setScreenSpaceError(float sse);
+        float getScreenSpaceError() const;
+
+        //! Whether to allow lighting when present
+        void setEnableLighting(const bool& value);
+        const bool& getEnableLighting() const;
+
+        //! Access to the terrain-specific options API.
+        TerrainOptionsAPI getTerrainOptions();
+
+        //! Spatial Reference System of the underlying map.
         const SpatialReference* getMapSRS() const;
 
-        /**
-         * Gets an interface for querying the in-memory terrain scene graph directly.
-         */
+        //! API for for querying the in-memory terrain scene graph directly.
         Terrain* getTerrain();
         const Terrain* getTerrain() const;
 
@@ -124,8 +136,9 @@ namespace osgEarth
          * @param travMask
          *      Traversal mask to apply while searching
          */
-        static MapNode* findMapNode( osg::Node* graph, unsigned travMask =~0 );
-        static MapNode* get( osg::Node* graph, unsigned travMask =~0 ) { return findMapNode(graph, travMask); }
+        static MapNode* findMapNode(osg::Node* graph, unsigned travMask = ~0);
+        static MapNode* get(osg::Node* graph, unsigned travMask = ~0) { return findMapNode(graph, travMask); }
+        static MapNode* get(osg::ref_ptr<osg::Node>& graph, unsigned travMask = ~0) { return findMapNode(graph.get(), travMask); }
 
         /**
          * Returns true if the realized terrain model is geocentric, false if
@@ -139,31 +152,9 @@ namespace osgEarth
         osg::Group* getLayerNodeGroup() const;
 
         /**
-         * Accesses the root node for a specific ModelLayer.
-         */
-        osg::Node* getLayerNode(Layer* layer) const;
-        
-        /**
-         * Gets the overlay decorator in this mapnode. Usually you do not need to
-         * access this directly. Instead install a DrapeableNode in the scene graph.
-         */
-        OverlayDecorator* getOverlayDecorator() { return _overlayDecorator; }
-
-        /**
-         * Gets the engine properties associated with this node. The engine
-         * properties dictate how the map engine will create scene graph elements.
-         */
-        const MapNodeOptions& getMapNodeOptions() const;
-
-        /**
          * Gets the underlying terrain engine that renders the terrain surface of the map.
          */
-        TerrainEngineNode* getTerrainEngine() const;
-
-        /**
-         * Gets a service that you can use to release GL objects.
-         */
-        ResourceReleaser* getResourceReleaser() const;
+        TerrainEngine* getTerrainEngine() const;
 
         /**
          * Gets the Config object serializing external data. External data is information
@@ -205,34 +196,49 @@ namespace osgEarth
             return 0L;
         }
 
-        /**
-         * Opens all layers that are not already open.
-         */
+        //! Opens all layers that are not already open.
         void openMapLayers();
 
         //! Serializes the MapNode into a Config object
         Config getConfig() const;
 
+        //! Opens the map (installs a terrain engine and initializes all the layers)
+        bool open();
 
-    public: // special purpose
+        //! Returns the map coordinates under the provided mouse (window) coordinates.
+        //! @param view View in which to do the query
+        //! @param mx, my Mouse coordinates
+        //! @param out_point Outputs the point under the mouse (when returning true)
+        //! @return true upon success, false upon failure
+        bool getGeoPointUnderMouse(
+            osg::View*  view,
+            float       mx,
+            float       my,
+            GeoPoint&   out_point) const;
 
-        /**
-         * Constructs a mapnode, optionally specifying whether th intialize the
-         * data sources in the map. Typically you would only use this CTOR if you are
-         * strictly using the MapNode for serialization.
-         */
-        MapNode( Map* map, const MapNodeOptions& options, bool initMap );
+        //! Returns the map coordinates under the provided mouse (window) coordinates.
+        //! @param view View in which to do the query
+        //! @param mx, my Mouse coordinates
+        //! @return Outputs the point under the mouse
+        GeoPoint getGeoPointUnderMouse(
+            osg::View* view,
+            float mx,
+            float my) const;
 
+    public: // osg::Object
+
+        const char* libraryName() const override { return "osgEarth"; }
+        const char* className() const override { return "MapNode"; }
 
     public: //override osg::Node
 
-        virtual osg::BoundingSphere computeBound() const;
+        osg::BoundingSphere computeBound() const override;
 
-        virtual void traverse( class osg::NodeVisitor& nv );
+        void traverse(class osg::NodeVisitor& nv) override;
 
-        virtual void resizeGLObjectBuffers(unsigned maxSize);
+        void resizeGLObjectBuffers(unsigned maxSize) override;
 
-        virtual void releaseGLObjects(osg::State* state) const;
+        void releaseGLObjects(osg::State* state) const override;
 
     protected:    
 
@@ -242,21 +248,20 @@ namespace osgEarth
 
         osg::ref_ptr<Map>  _map;
         osg::Group*        _layerNodes;
-        OverlayDecorator*  _overlayDecorator;
-        MapNodeOptions     _mapNodeOptions;
-        Config             _externalConf;
-        osg::Group*        _maskLayerNode;
         unsigned           _lastNumBlacklistedFilenames;
-        TerrainEngineNode* _terrainEngine;
-        bool               _terrainEngineInitialized;
-        osg::Group*        _terrainEngineContainer;
-        ResourceReleaser*  _resourceReleaser;
-        DrapingManager*    _drapingManager;
+        Config             _externalConf;
+        osg::Group*        _terrainGroup;
+        std::shared_ptr<DrapingManager> _drapingManager;
         ClampingManager*   _clampingManager;
+        std::atomic<bool>  _readyForUpdate;
+
+        // yes, this must be a ref_ptr so observers can point to it
+        // in setMap().
+        osg::ref_ptr<TerrainEngineNode> _terrainEngine;
 
         std::vector< osg::ref_ptr<Extension> > _extensions;
 
-        Revisioned _mapRevisionMonitor;
+        bool _isOpen;
 
     public: // MapCallback proxy
 
@@ -267,16 +272,24 @@ namespace osgEarth
     private:
 
         osg::ref_ptr< MapCallback > _mapCallback;
+        osg::ref_ptr<osg::Uniform> _sseU;
     
         void init();
 
-        DrapingManager* getDrapingManager();
+        //std::shared_ptr<DrapingManager>& getDrapingManager();
         friend class DrapingTechnique;
         friend class DrapeableNode;
         
         ClampingManager* getClampingManager();
         friend class ClampingTechnique;
         friend class ClampableNode;
+
+    private:
+        Options _optionsConcrete;
+        Options& options() { return _optionsConcrete; }
+
+    public:
+        const Options& options() const { return _optionsConcrete; }
     };
 
 } // namespace osgEarth

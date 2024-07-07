@@ -20,7 +20,7 @@
 #define OSGEARTH_DRIVER_CACHE_ROCKSDB_TRACKER 1
 
 #include "RocksDBCacheOptions"
-#include <osgEarth/ThreadingUtils>
+#include <osgEarth/Threading>
 #include <osgDB/FileUtils>
 #include <osgDB/FileNameUtils>
 #include <osg/Referenced>
@@ -29,10 +29,8 @@
 #   include <unistd.h>
 #endif
 
-namespace osgEarth { namespace Drivers { namespace RocksDBCache
+namespace osgEarth { namespace RocksDBCache
 {
-    typedef OpenThreads::Atomic unsigned_atomic;
-
     /**
      * Tracks usage metrics across a RocksDB cache
      */
@@ -56,9 +54,9 @@ namespace osgEarth { namespace Drivers { namespace RocksDBCache
         virtual ~Tracker() { }
 
     public:
-        unsigned_atomic reads;
-        unsigned_atomic hits;
-        unsigned_atomic writes;
+        std::atomic_uint reads;
+        std::atomic_uint hits;
+        std::atomic_uint writes;
 
         bool hasSizeLimit() const {
             return _options.maxSizeMB().isSet();
@@ -108,6 +106,6 @@ namespace osgEarth { namespace Drivers { namespace RocksDBCache
         optional<unsigned>        _seed;
     };
 
-} } } // namespace osgEarth::Drivers::RocksDBCache
+} } // namespace osgEarth::RocksDBCache
 
 #endif // OSGEARTH_DRIVER_CACHE_ROCKSDB_TRACKER

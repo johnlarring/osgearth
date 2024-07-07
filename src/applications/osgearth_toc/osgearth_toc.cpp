@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -19,18 +19,26 @@
 * You should have received a copy of the GNU Lesser General Public License
 * along with this program.  If not, see <http://www.gnu.org/licenses/>
 */
-#include <osgEarth/Map>
-#include <osgEarth/MapNode>
-#include <osgEarth/MapModelChange>
-#include <osgEarth/ElevationPool>
-#include <osgEarthUtil/EarthManipulator>
-#include <osgEarthUtil/Controls>
-#include <osgEarthUtil/ExampleResources>
-#include <osgEarthUtil/ViewFitter>
 #include <osgViewer/Viewer>
 #include <osgViewer/ViewerEventHandlers>
 #include <osgGA/StateSetManipulator>
 #include <osgDB/ReadFile>
+
+#include <osgEarth/Map>
+#include <osgEarth/MapNode>
+#include <osgEarth/MapModelChange>
+#include <osgEarth/ElevationPool>
+#include <osgEarth/XmlUtils>
+#include <osgEarth/EarthManipulator>
+#include <osgEarth/Controls>
+#include <osgEarth/ExampleResources>
+#include <osgEarth/ViewFitter>
+#include <osgEarth/LabelNode>
+#include <osgEarth/AnnotationLayer>
+#include <osgEarth/TerrainEngineNode>
+#include <osgEarth/Metrics>
+#include <osgEarth/WindLayer>
+#include <osgEarth/SelectExtentTool>
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
@@ -39,7 +47,9 @@ using namespace osgEarth::Util::Controls;
 void createControlPanel(Container*);
 void updateControlPanel();
 
+static osg::ref_ptr<MapNode> s_mapNode;
 static osg::ref_ptr<Map> s_activeMap;
+static LabelControl* s_mapTitle;
 static Grid* s_activeBox;
 static Grid* s_inactiveBox;
 static bool s_updateRequired = true;
@@ -76,7 +86,6 @@ struct UpdateOperation : public osg::Operation
 
             if (s_change.getElevationLayer())
             {
-                OE_NOTICE << "Dirtying model layers.\n";
                 dirtyModelLayers();
             }
         }
@@ -94,30 +103,22 @@ struct UpdateOperation : public osg::Operation
             {
                 ms->dirty();
             }
-            else
-            {
-                OE_NOTICE << modelLayers[i]->getName()
-                    << " has no model source.\n";
-            }
         }
     }
 };
 
-
-struct DumpElevation : public osgGA::GUIEventHandler
+struct ToggleMinValidValue : public osgGA::GUIEventHandler
 {
-    DumpElevation(MapNode* mapNode, char c) : _mapNode(mapNode), _c(c) { }
+    ToggleMinValidValue(MapNode* mapNode, char c) : _mapNode(mapNode), _c(c) { }
     bool handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa, osg::Object*, osg::NodeVisitor*)
     {
         if (ea.getEventType() == ea.KEYDOWN && ea.getKey() == _c)
         {
-            osg::Vec3d world;
-            _mapNode->getTerrain()->getWorldCoordsUnderMouse(aa.asView(), ea.getX(), ea.getY(), world);
-            GeoPoint coords;
-            coords.fromWorld(s_activeMap->getSRS(), world);
-            osg::ref_ptr<ElevationEnvelope> env = s_activeMap->getElevationPool()->createEnvelope(s_activeMap->getSRS(), 23u);
-            float ep_elev = env->getElevation(coords.x(), coords.y());
-            OE_NOTICE << "Elevations under mouse. EP=" << ep_elev << "\n";
+            ElevationLayer* e = _mapNode->getMap()->getLayer<ElevationLayer>();
+            if (e->getMinValidValue() >= 0)
+                e->resetMinValidValue();
+            else
+                e->setMinValidValue(0);
         }
         return false;
     }
@@ -125,11 +126,142 @@ struct DumpElevation : public osgGA::GUIEventHandler
     MapNode* _mapNode;
 };
 
+struct SetWindPoint : public osgGA::GUIEventHandler
+{
+    SetWindPoint(MapNode* mapNode, char c) : _mapNode(mapNode), _c(c), _wind(NULL)
+    {
+        //osg::Node* heli = osgDB::readNodeFile("D:/mak/helicopter.osgb.(10,10,10).scale");
+        osg::Node* heli = osgDB::readNodeFile("../data/red_flag.osg");
+        _xform = new GeoTransform();
+        if (heli)
+            _xform->addChild(heli);
+        mapNode->addChild(_xform);
+    }
+    bool handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa, osg::Object*, osg::NodeVisitor*)
+    {
+        if (ea.getEventType() == ea.KEYDOWN && ea.getKey() == _c)
+        {
+            osg::Vec3d world;
+            if (s_mapNode->getTerrain()->getWorldCoordsUnderMouse(aa.asView(), ea.getX(), ea.getY(), world))
+            {
+                WindLayer* layer = s_mapNode->getMap()->getLayer<WindLayer>();
+                if (!_wind)
+                {
+                    if (layer)
+                    {
+                        _wind = new Wind();
+                        _wind->setType(Wind::TYPE_POINT);
+                        _wind->setSpeed(Speed(125.0, Units::KILOMETERS_PER_HOUR));
+                        layer->addWind(_wind);
+                    }
+
+                    GeoPoint p;
+                    p.fromWorld(s_mapNode->getMapSRS(), world);
+                    p.alt() = 50.0;
+                    p.altitudeMode() = ALTMODE_RELATIVE;
+                    _xform->setPosition(p);
+
+                    p.makeAbsolute(s_mapNode->getTerrain());
+                    _wind->setPoint(p);
+                }
+                else
+                {
+                    layer->removeWind(_wind);
+                    _wind = NULL;
+                }
+            }
+            else OE_WARN << "Try again, no intersection :(" << std::endl;
+        }
+        else if (ea.getEventType() == ea.FRAME)
+        {
+            if (_wind)
+            {
+                GeoPoint p = _xform->getPosition();
+                p.alt() = 4.0; // + 25.0 + 25.0*sin((double)(aa.asView()->getFrameStamp()->getReferenceTime()));
+                //p.alt() = 2.0;
+                _xform->setPosition(p);
+                p.makeAbsolute(s_mapNode->getTerrain());
+                _wind->setPoint(p);
+            }
+
+            //if (_wind)
+            //{
+            //    osg::Vec3d world;
+            //    if (s_mapNode->getTerrain()->getWorldCoordsUnderMouse(aa.asView(), ea.getX(), ea.getY(), world))
+            //    {
+            //        osg::Vec3d n = world;
+            //        n.normalize();
+            //        world += n*1.0;
+            //        _wind->point() = world;
+            //    }
+            //}
+
+            //osg::Vec3d eye,center,up;
+            //aa.asView()->getCamera()->getViewMatrixAsLookAt(eye,center,up);
+            //if (_wind)
+            //    {
+            //      OE_WARN << (_wind->point().get() - eye).length() << std::endl;
+            //    }
+        }
+
+        return false;
+    }
+    char _c;
+    MapNode* _mapNode;
+    GeoTransform* _xform;
+    Wind* _wind;
+};
+
+struct DumpLabel : public osgGA::GUIEventHandler
+{
+    DumpLabel(MapNode* mapNode, char c) : _mapNode(mapNode), _c(c), _layer(0L) { }
+
+    bool handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa, osg::Object*, osg::NodeVisitor*)
+    {
+        if (ea.getEventType() == ea.KEYDOWN && ea.getKey() == _c)
+        {
+            osg::Vec3d world;
+            _mapNode->getTerrain()->getWorldCoordsUnderMouse(aa.asView(), ea.getX(), ea.getY(), world);
+
+            GeoPoint coords;
+            coords.fromWorld(s_activeMap->getSRS(), world);
+
+            if (!_layer)
+            {
+                _layer = new AnnotationLayer();
+                _layer->setName("User-created Labels");
+                _mapNode->getMap()->addLayer(_layer);
+            }
+
+            LabelNode* label = new LabelNode();
+            label->setText("Label");
+            label->setPosition(coords);
+
+            Style style;
+            TextSymbol* symbol = style.getOrCreate<TextSymbol>();
+            symbol->alignment() = symbol->ALIGN_CENTER_CENTER;
+            symbol->size() = 24;
+            symbol->halo()->color().set(.1,.1,.1,1);
+            label->setStyle(style);
+
+            _layer->addChild(label);
+
+            osg::ref_ptr<XmlDocument> xml = new XmlDocument(label->getConfig());
+            xml->store(std::cout);
+        }
+        return false;
+    }
+    char _c;
+    MapNode* _mapNode;
+    AnnotationLayer* _layer;
+};
+
 //------------------------------------------------------------------------
 
 int
 main( int argc, char** argv )
 {
+    osgEarth::initialize();
     osg::ArgumentParser arguments( &argc,argv );
 
     // configure the viewer.
@@ -139,27 +271,19 @@ main( int argc, char** argv )
     // install a motion model
     viewer.setCameraManipulator( s_manip = new osgEarth::Util::EarthManipulator() );
 
-    // disable the small-feature culling (so text will work)
-    viewer.getCamera()->setSmallFeatureCullingPixelSize(-1.0f);
-
-    // Load an earth file 
+    // Load an earth file
     Container* uiRoot = new VBox();
     uiRoot->setAbsorbEvents(false);
     createControlPanel(uiRoot);
 
-    osg::Node* loaded = osgEarth::Util::MapNodeHelper().load(arguments, &viewer, uiRoot);
-    osgEarth::MapNode* mapNode = osgEarth::MapNode::get(loaded);
-    if ( !mapNode ) {
-        OE_WARN << "No osgEarth MapNode found in the loaded file(s)." << std::endl;
+    auto loaded = osgEarth::Util::MapNodeHelper().load(arguments, &viewer, uiRoot);
+    s_mapNode = osgEarth::MapNode::get(loaded);
+    if ( !s_mapNode.valid() )
         return -1;
-    }
 
     // the displayed Map:
-    s_activeMap = mapNode->getMap();
+    s_activeMap = s_mapNode->getMap();
     s_activeMap->addMapCallback( new MyMapListener() );
-
-    //osg::Group* root = new osg::Group();
-    //root->addChild( loaded );
 
     // update the control panel with the two Maps:
     updateControlPanel();
@@ -169,22 +293,50 @@ main( int argc, char** argv )
     // install our control panel updater
     viewer.addUpdateOperation( new UpdateOperation() );
 
-    viewer.addEventHandler(new DumpElevation(mapNode, 'E'));
+    viewer.addEventHandler(new DumpLabel(s_mapNode.get(), 'L'));
 
-    viewer.run();
+    viewer.addEventHandler(new ToggleMinValidValue(s_mapNode.get(), 'M'));
+
+    viewer.addEventHandler(new SetWindPoint(s_mapNode.get(), 'p'));
+
+    // Tool to zoom to a map extent (SHIFT-CTRL-DRAG)
+    Contrib::SelectExtentTool* zoomTool = new Contrib::SelectExtentTool(s_mapNode.get());
+    zoomTool->setModKeyMask(osgGA::GUIEventAdapter::MODKEY_LEFT_SHIFT | osgGA::GUIEventAdapter::MODKEY_LEFT_CTRL); 
+    viewer.addEventHandler(zoomTool);
+    zoomTool->setCallback([&](const GeoExtent& ex) {
+        Viewpoint vp;
+        ViewFitter fitter(s_mapNode->getMapSRS(), viewer.getCamera());
+        if (fitter.createViewpoint(ex, vp))
+            s_manip->setViewpoint(vp, 0.5);
+        zoomTool->clear();
+    });
+
+    // Tool to invalidate a map extent (ALT-DRAG)
+    Contrib::SelectExtentTool* invalidateTool = new Contrib::SelectExtentTool(s_mapNode.get());
+    invalidateTool->setModKeyMask(osgGA::GUIEventAdapter::MODKEY_LEFT_ALT);
+    invalidateTool->getStyle().getOrCreateSymbol<LineSymbol>()->stroke()->color() = Color::Red;
+    viewer.addEventHandler(invalidateTool);
+    invalidateTool->setCallback([&](const GeoExtent& ex) {
+        OE_NOTICE << "Invalidating extent " << ex.toString() << std::endl;
+        s_mapNode->getTerrainEngine()->invalidateRegion(ex);
+        invalidateTool->clear();
+    });
+
+    return Metrics::run(viewer);
 }
 
 //------------------------------------------------------------------------
 
-struct EnableDisableHandler : public ControlEventHandler
+struct RefreshHandler : public ControlEventHandler
 {
-    EnableDisableHandler( Layer* layer ) : _layer(layer) { }
-    void onClick( Control* control )
+    RefreshHandler(const Layer* layer) : _layer(layer) { }
+    void onClick(Control* control)
     {
-        _layer->setEnabled( !_layer->getEnabled() );
-        updateControlPanel();
+        std::vector<const Layer*> layers;
+        layers.push_back(_layer);
+        s_mapNode->getTerrainEngine()->invalidateRegion(layers, GeoExtent::INVALID);
     }
-    Layer* _layer;
+    const Layer* _layer;
 };
 
 struct ToggleLayerVisibility : public ControlEventHandler
@@ -258,7 +410,7 @@ struct ZoomLayerHandler : public ControlEventHandler
             std::vector<GeoPoint> points;
             points.push_back(GeoPoint(extent.getSRS(), extent.west(), extent.south()));
             points.push_back(GeoPoint(extent.getSRS(), extent.east(), extent.north()));
-            
+
             ViewFitter fitter(s_activeMap->getSRS(), s_view->getCamera());
             Viewpoint vp;
             if (fitter.createViewpoint(points, vp))
@@ -298,13 +450,18 @@ struct ZoomLayerHandler : public ControlEventHandler
 
 //------------------------------------------------------------------------
 
+#define BACKCOLOR 0,0,0,0.2
 
 void
 createControlPanel(Container* container)
 {
+    s_mapTitle = new LabelControl();
+    s_mapTitle->setBackColor(BACKCOLOR);
+    container->addControl(s_mapTitle);
+
     //The Map layers
     s_activeBox = new Grid();
-    s_activeBox->setBackColor(0,0,0,0.1);
+    s_activeBox->setBackColor(BACKCOLOR);
     s_activeBox->setPadding( 10 );
     s_activeBox->setChildSpacing( 10 );
     s_activeBox->setChildVertAlign( Control::ALIGN_CENTER );
@@ -313,7 +470,7 @@ createControlPanel(Container* container)
 
     //the removed layers
     s_inactiveBox = new Grid();
-    s_inactiveBox->setBackColor(0,0,0,0.1);
+    s_inactiveBox->setBackColor(BACKCOLOR);
     s_inactiveBox->setPadding( 10 );
     s_inactiveBox->setChildSpacing( 10 );
     s_inactiveBox->setChildVertAlign( Control::ALIGN_CENTER );
@@ -336,13 +493,13 @@ addLayerItem( Grid* grid, int layerIndex, int numLayers, Layer* layer, bool isAc
     ImageLayer* imageLayer = dynamic_cast<ImageLayer*>(layer);
 
     // don't show hidden coverage layers
-    if (imageLayer && imageLayer->isCoverage() && !imageLayer->getVisible())
+    if (imageLayer && imageLayer->isCoverage())
         return;
-    
+
     ElevationLayer* elevationLayer = dynamic_cast<ElevationLayer*>(layer);
 
     // a checkbox to toggle the layer's visibility:
-    if (visibleLayer && layer->getEnabled() && !(imageLayer && imageLayer->isCoverage()))
+    if (visibleLayer && layer->isOpen() && !(imageLayer && imageLayer->isCoverage()))
     {
         CheckBoxControl* visibility = new CheckBoxControl( visibleLayer->getVisible() );
         visibility->addEventHandler( new ToggleLayerVisibility(visibleLayer) );
@@ -351,10 +508,22 @@ addLayerItem( Grid* grid, int layerIndex, int numLayers, Layer* layer, bool isAc
     gridCol++;
 
     // the layer name
-    LabelControl* name = new LabelControl( layer->getName() );
-    if (!layer->getEnabled())
-        name->setForeColor(osg::Vec4f(1,1,1,0.35));
-    grid->setControl( gridCol, gridRow, name );
+    if (layer->isOpen() && (layer->getExtent().isValid() || layer->getNode()))
+    {
+        ButtonControl* name = new ButtonControl(layer->getName());
+        name->clearBackColor();
+        name->setPadding(4);
+        name->addEventHandler( new ZoomLayerHandler(layer) );
+        grid->setControl( gridCol, gridRow, name );
+    }
+    else
+    {
+        LabelControl* name = new LabelControl( layer->getName() );
+        name->setPadding(4);
+        if (!layer->isOpen())
+            name->setForeColor(osg::Vec4f(1,1,1,0.35));
+        grid->setControl( gridCol, gridRow, name );
+    }
     gridCol++;
 
     // layer type
@@ -367,12 +536,12 @@ addLayerItem( Grid* grid, int layerIndex, int numLayers, Layer* layer, bool isAc
     // status indicator
     LabelControl* statusLabel =
         layer->getStatus().isError() ? new LabelControl("[error]", osg::Vec4(1,0,0,1)) :
-        !layer->getEnabled()?          new LabelControl("[disabled]", osg::Vec4(1,1,1,0.35)) :
+        !layer->isOpen()?              new LabelControl("[closed]", osg::Vec4(1,1,1,0.35)) :
                                        new LabelControl("[ok]", osg::Vec4(0,1,0,1)) ;
     grid->setControl( gridCol, gridRow, statusLabel );
     gridCol++;
 
-    if (visibleLayer && !elevationLayer && visibleLayer->getEnabled())
+    if (visibleLayer && !elevationLayer && visibleLayer->isOpen())
     {
         // an opacity slider
         HSliderControl* opacity = new HSliderControl( 0.0f, 1.0f, visibleLayer->getOpacity() );
@@ -380,17 +549,6 @@ addLayerItem( Grid* grid, int layerIndex, int numLayers, Layer* layer, bool isAc
         opacity->setHeight( 12 );
         opacity->addEventHandler( new LayerOpacityHandler(visibleLayer) );
         grid->setControl( gridCol, gridRow, opacity );
-    }
-    gridCol++;
-
-    // zoom button
-    if (layer->getExtent().isValid() || layer->getNode())
-    {
-        LabelControl* zoomButton = new LabelControl("GO", 14);
-        zoomButton->setBackColor( .4,.4,.4,1 );
-        zoomButton->setActiveColor( .8,0,0,1 );
-        zoomButton->addEventHandler( new ZoomLayerHandler(layer) );
-        grid->setControl( gridCol, gridRow, zoomButton );
     }
     gridCol++;
 
@@ -424,14 +582,16 @@ addLayerItem( Grid* grid, int layerIndex, int numLayers, Layer* layer, bool isAc
     grid->setControl( gridCol, gridRow, addRemove );
     gridCol++;
 
-    // enable/disable button
-    LabelControl* enableDisable = new LabelControl(layer->getEnabled() ? "DISABLE" : "ENABLE", 14);
-    enableDisable->setHorizAlign( Control::ALIGN_CENTER );
-    enableDisable->setBackColor( .4,.4,.4,1 );
-    enableDisable->setActiveColor( .8,0,0,1 );
-    enableDisable->addEventHandler( new EnableDisableHandler(layer) );
-    grid->setControl( gridCol, gridRow, enableDisable );
-    gridCol++;
+    // refresh button (for image layers)
+    if (visibleLayer)
+    {
+        LabelControl* refresh = new LabelControl("REFRESH", 14);
+        refresh->setBackColor( .4,.4,.4,1 );
+        refresh->setActiveColor( .8,0,0,1 );
+        refresh->addEventHandler( new RefreshHandler(layer) );
+        grid->setControl( gridCol, gridRow, refresh );
+        gridCol++;
+    }
 
     if (layer->getStatus().isError())
     {
@@ -448,7 +608,7 @@ createInactiveLayerItem( Grid* grid, int gridRow, const std::string& name, const
     LabelControl* nameLabel = new LabelControl( name );
     grid->setControl( gridCol, gridRow, nameLabel );
     gridCol++;
-    
+
     LabelControl* addRemove = new LabelControl( "ADD", 14 );
     addRemove->setHorizAlign( Control::ALIGN_CENTER );
     addRemove->setBackColor( .4,.4,.4,1 );
@@ -462,14 +622,17 @@ updateControlPanel()
 {
     // erase all child controls and just rebuild them b/c we're lazy.
 
-    //Rebuild all the image layers    
+    //Rebuild all the image layers
     s_activeBox->clearControls();
 
     int row = 0;
 
-    LabelControl* activeLabel = new LabelControl( "Map Layers" );
-    activeLabel->setForeColor(osg::Vec4f(1,1,0,1));
-    s_activeBox->setControl( 1, row++, activeLabel );
+    std::string title =
+        s_activeMap->getName().empty()? "Map Layers" :
+        s_activeMap->getName();
+
+    s_mapTitle->setText(title);
+    s_mapTitle->setForeColor(osg::Vec4f(1,1,0,1));
 
     // the active map layers:
     LayerVector layers;
@@ -479,11 +642,6 @@ updateControlPanel()
     {
         Layer* layer = layers[i].get();
         addLayerItem(s_activeBox, i, layers.size(), layer, true);
-
-        if (layer->getStatus().isError())
-        {
-            OE_WARN << layer->getName() << " : " << layer->getStatus().toString() << "\n";
-        }
     }
 
     // inactive layers:

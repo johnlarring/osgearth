@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -29,17 +29,17 @@ using namespace osgEarth;
 
 TerrainResources::TerrainResources()
 {
-    //nop
+    // Unit 0 cannot be reserved
+    _globallyReservedUnits.insert(0);
 }
 
 bool
-TerrainResources::reserveTextureImageUnit(int&        out_unit,
-                                          const char* requestor)
+TerrainResources::reserveTextureImageUnit(int& out_unit, const char* requestor)
 {
     out_unit = -1;
     unsigned maxUnits = osgEarth::Registry::instance()->getCapabilities().getMaxGPUTextureUnits();
     
-    Threading::ScopedMutexLock exclusiveLock( _reservedUnitsMutex );
+    std::lock_guard<std::mutex> exclusiveLock( _reservedUnitsMutex );
     
     // first collect a list of units that are already in use.
     std::set<int> taken;
@@ -75,7 +75,7 @@ TerrainResources::reserveTextureImageUnit(TextureImageUnitReservation& reservati
     reservation._unit = -1;
     unsigned maxUnits = osgEarth::Registry::instance()->getCapabilities().getMaxGPUTextureUnits();
     
-    Threading::ScopedMutexLock exclusiveLock( _reservedUnitsMutex );
+    std::lock_guard<std::mutex> exclusiveLock( _reservedUnitsMutex );
     
     // first collect a list of units that are already in use.
     std::set<int> taken;
@@ -119,7 +119,7 @@ TerrainResources::reserveTextureImageUnitForLayer(TextureImageUnitReservation& r
     reservation._unit = -1;
     unsigned maxUnits = osgEarth::Registry::instance()->getCapabilities().getMaxGPUTextureUnits();
     
-    Threading::ScopedMutexLock exclusiveLock( _reservedUnitsMutex );
+    std::lock_guard<std::mutex> exclusiveLock( _reservedUnitsMutex );
     
     // first collect a list of units that are already in use.
     std::set<int> taken;
@@ -149,9 +149,9 @@ TerrainResources::reserveTextureImageUnitForLayer(TextureImageUnitReservation& r
 void
 TerrainResources::releaseTextureImageUnit(int unit)
 {
-    Threading::ScopedMutexLock exclusiveLock( _reservedUnitsMutex );
+    std::lock_guard<std::mutex> exclusiveLock( _reservedUnitsMutex );
     _globallyReservedUnits.erase( unit );
-    OE_INFO << LC << "Texture unit " << unit << " released\n";
+    OE_INFO << LC << "Texture unit " << unit << " released" << std::endl;
 }
 
 void
@@ -160,7 +160,7 @@ TerrainResources::releaseTextureImageUnit(int unit, const Layer* layer)
     if (layer == 0L)
         releaseTextureImageUnit(unit);
 
-    Threading::ScopedMutexLock exclusiveLock( _reservedUnitsMutex );
+    std::lock_guard<std::mutex> exclusiveLock( _reservedUnitsMutex );
     PerLayerReservedUnits::iterator i = _perLayerReservedUnits.find(layer);
     if (i != _perLayerReservedUnits.end())
     {
@@ -180,7 +180,7 @@ TerrainResources::releaseTextureImageUnit(int unit, const Layer* layer)
 bool
 TerrainResources::setTextureImageUnitOffLimits(int unit)
 {
-    Threading::ScopedMutexLock exclusiveLock( _reservedUnitsMutex );
+    std::lock_guard<std::mutex> exclusiveLock( _reservedUnitsMutex );
 
     // Make sure it's not already reserved:
     if (_globallyReservedUnits.find(unit) != _globallyReservedUnits.end())
@@ -204,6 +204,22 @@ TerrainResources::setTextureImageUnitOffLimits(int unit)
     return true;
 }
 
+
+float
+TerrainResources::getVisibilityRangeHint(unsigned lod) const
+{
+    return lod < _visibilityRanges.size() ? _visibilityRanges[lod] : FLT_MAX;
+}
+
+void
+TerrainResources::setVisibilityRangeHint(unsigned lod, float range)
+{
+    if (_visibilityRanges.size() <= lod)
+        _visibilityRanges.resize(lod+1);
+
+    _visibilityRanges[lod] = range;
+}
+
 //........................................................................
 TextureImageUnitReservation::TextureImageUnitReservation()
 {
@@ -213,9 +229,17 @@ TextureImageUnitReservation::TextureImageUnitReservation()
 
 TextureImageUnitReservation::~TextureImageUnitReservation()
 {
+    release();
+}
+
+void
+TextureImageUnitReservation::release()
+{
     osg::ref_ptr<TerrainResources> res;
     if (_unit >= 0 && _res.lock(res))
     {
         res->releaseTextureImageUnit(_unit, _layer);
+        _unit = -1;
+        _layer = 0L;
     }
 }

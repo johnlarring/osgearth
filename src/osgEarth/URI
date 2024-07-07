@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -20,21 +20,24 @@
 #define OSGEARTH_URI 1
 
 #include <osgEarth/Common>
-#include <osgEarth/CacheBin>
-#include <osgEarth/CachePolicy>
 #include <osgEarth/Containers>
 #include <osgEarth/IOTypes>
-#include <osgEarth/HTTPClient>
 #include <osg/Image>
 #include <osg/Node>
+#include <osgDB/Options>
 #include <osgDB/ReaderWriter>
-#include <iostream>
-#include <sstream>
+
+namespace osgUtil
+{
+    class IncrementalCompileOperation;
+}
 
 namespace osgEarth
 {
     class URI;
     class ProgressCallback;
+
+    using namespace Threading;
 
     /**
      * Context for resolving relative URIs.
@@ -113,7 +116,7 @@ namespace osgEarth
     class OSGEARTH_EXPORT URIStream
     {
     public:
-        URIStream( const URI& uri );
+        URIStream(const URI& uri, std::ios_base::openmode mode =std::ios_base::in);
 
         virtual ~URIStream();
 
@@ -123,8 +126,7 @@ namespace osgEarth
 
     protected:
         friend class URI;
-        std::istream*     _fileStream;
-        std::stringstream _bufStream;
+        std::istream* _instream;
     };
 
 //--------------------------------------------------------------------
@@ -284,11 +286,23 @@ namespace osgEarth
 
         void ctorCacheKey();
     };
-    
+}
 
 //------------------------------------------------------------------------
 
+namespace std {
+    // std::hash specialization for URI
+    template<> struct hash<osgEarth::URI> {
+        inline size_t operator()(const osgEarth::URI& value) const {
+            return hash<string>()(value.full());
+        }
+    };
+}
 
+//------------------------------------------------------------------------
+
+namespace osgEarth
+{
     /**
      * A lookup table that maps URI references to other URI references. This
      * is used as an optional resource mapping table. (See KML's ResourceMap
@@ -430,8 +444,9 @@ namespace osgEarth
         if ( hasChild(key) ) {
             const Config& uriconf = child(key);
             if (!uriconf.value().empty()) {
-                output = URI(uriconf.value(), referrer());
-                output->mergeConfig(uriconf);
+                URI uri(uriconf.value(), uriconf.referrer());
+                uri.mergeConfig(uriconf);
+                output = uri;
                 return true;
             }
             else return false;
@@ -464,7 +479,7 @@ namespace osgEarth
                 std::string source = i->value("source");
                 std::string target = i->value("target");
                 if ( !source.empty() && !target.empty() )
-                    output->insert( source, target );
+                    output.mutable_value().insert( source, target );
             }
             return true;
         }
@@ -501,7 +516,6 @@ namespace osgEarth
 
         return escaped.str();
     }
-
 }
 
 #endif // OSGEARTH_URI

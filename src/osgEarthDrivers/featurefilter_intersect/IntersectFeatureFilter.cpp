@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
  * Copyright 2008-2014 Pelican Mapping
  * http://osgearth.org
  *
@@ -22,12 +22,12 @@
 #include <osgEarth/ImageUtils>
 #include <osgEarth/Progress>
 
-#include <osgEarthFeatures/Filter>
-#include <osgEarthFeatures/FeatureCursor>
-#include <osgEarthFeatures/FeatureSource>
-#include <osgEarthFeatures/FilterContext>
+#include <osgEarth/Filter>
+#include <osgEarth/FeatureCursor>
+#include <osgEarth/FeatureSource>
+#include <osgEarth/FilterContext>
 
-#include <osgEarthSymbology/Geometry>
+#include <osgEarth/Geometry>
 
 #include <osgDB/FileNameUtils>
 #include <osgDB/FileUtils>
@@ -35,9 +35,7 @@
 #define LC "[Intersect FeatureFilter] "
 
 using namespace osgEarth;
-using namespace osgEarth::Features;
 using namespace osgEarth::Drivers;
-using namespace osgEarth::Symbology;
 
 
 
@@ -45,6 +43,7 @@ class IntersectFeatureFilter : public FeatureFilter, public IntersectFeatureFilt
 {
 private:
     osg::ref_ptr< FeatureSource > _featureSource;
+    osg::ref_ptr< const osgDB::Options > _readOptions;
 
 public:
     IntersectFeatureFilter(const ConfigOptions& options)
@@ -56,16 +55,18 @@ public: // FeatureFilter
 
     Status initialize(const osgDB::Options* readOptions)
     {
-        // Load the feature source containing the intersection geometry.
-        _featureSource = FeatureSourceFactory::create( features().get() );
-        if ( !_featureSource.valid() )
-            return Status::Error(Status::ServiceUnavailable, Stringify()<< "Failed to create feature driver \"" << features()->getDriver() << "\"");
-
-        const Status& s = _featureSource->open(readOptions);
-        if (s.isError())
-            return s;
-
+        _readOptions = readOptions;
         return Status::OK();
+    }
+
+    virtual void addedToMap(const class Map* map) override
+    {
+        if (!_featureSource.valid())
+        {
+            featureSource().open(_readOptions.get());
+            featureSource().addedToMap(map);
+            _featureSource = featureSource().getLayer();
+        }
     }
 
     /**
@@ -78,7 +79,7 @@ public: // FeatureFilter
         query.bounds() = localExtent.bounds();
         if (localExtent.intersects( _featureSource->getFeatureProfile()->getExtent()))
         {
-            osg::ref_ptr< FeatureCursor > cursor = _featureSource->createFeatureCursor(query, progress);
+            osg::ref_ptr< FeatureCursor > cursor = _featureSource->createFeatureCursor(query, {}, nullptr, progress);
             if (cursor)
             {
                 cursor->fill( features );
@@ -87,7 +88,7 @@ public: // FeatureFilter
     }
 
     FilterContext push(FeatureList& input, FilterContext& context)
-    {
+    {       
         if (_featureSource.valid())
         {
             osg::ref_ptr<ProgressCallback> progress = new ProgressCallback();
@@ -95,8 +96,7 @@ public: // FeatureFilter
             // Get any features that intersect this query.
             FeatureList boundaries;
             getFeatures(context.extent().get(), boundaries, progress.get());
-            
-            
+                        
             // The list of output features
             FeatureList output;
 
@@ -121,7 +121,7 @@ public: // FeatureFilter
                     Feature* feature = f->get();
                     if ( feature && feature->getGeometry() )
                     {
-                        osg::Vec2d c = feature->getGeometry()->getBounds().center2d();
+                        osg::Vec3d c = feature->getGeometry()->getBounds().center();
 
                         if ( contains() == true )
                         {
@@ -165,7 +165,7 @@ public: // FeatureFilter
                 }
             }
 
-            OE_INFO << LC << "Allowed " << output.size() << " out of " << input.size() << " features\n";
+            OE_DEBUG << LC << "Allowed " << output.size() << " out of " << input.size() << " features\n";
 
             input = output;
         }

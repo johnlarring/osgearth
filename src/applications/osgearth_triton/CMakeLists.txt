@@ -1,9 +1,6 @@
-INCLUDE_DIRECTORIES(${OSG_INCLUDE_DIRS})
-SET(TARGET_LIBRARIES_VARS OSG_LIBRARY OSGDB_LIBRARY OSGUTIL_LIBRARY OSGVIEWER_LIBRARY OPENTHREADS_LIBRARY)
+add_osgearth_app(
+    TARGET osgearth_triton
+    SOURCES osgearth_triton.cpp
+    FOLDER Tests )
 
-SET(TARGET_COMMON_LIBRARIES ${TARGET_COMMON_LIBRARIES} osgEarthUtil osgEarthTriton)
-
-SET(TARGET_SRC osgearth_triton.cpp )
-
-#### end var setup  ###
-SETUP_APPLICATION(osgearth_triton)
+target_link_libraries(osgearth_triton PRIVATE osgEarthTriton)

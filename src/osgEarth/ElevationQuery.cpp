@@ -1,6 +1,7 @@
+
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -23,6 +24,7 @@
 #define LC "[ElevationQuery] "
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 
 ElevationQuery::ElevationQuery()
@@ -68,9 +70,6 @@ ElevationQuery::reset()
         // revisions are now in sync.
         _mapRevision = map->getDataModelRevision();
     }
-
-    // clear any active envelope
-    _envelope = 0L;
 }
 void
 ElevationQuery::sync()
@@ -130,24 +129,47 @@ ElevationQuery::getElevations(std::vector<osg::Vec3d>& points,
                               const SpatialReference*  pointsSRS,
                               bool                     ignoreZ,
                               double                   desiredResolution )
-{
-    sync();
-    for( osg::Vec3dArray::iterator i = points.begin(); i != points.end(); ++i )
+{       
+    if (_map->getNumTerrainPatchLayers() > 0)
     {
-        float elevation;
-        double z = (*i).z();
-        GeoPoint p(pointsSRS, *i, ALTMODE_ABSOLUTE);
-        if ( getElevationImpl(p, elevation, desiredResolution, 0L))
+        sync();
+        for (osg::Vec3dArray::iterator i = points.begin(); i != points.end(); ++i)
         {
-            if (elevation == NO_DATA_VALUE)
+            float elevation;
+            double z = (*i).z();
+            GeoPoint p(pointsSRS, *i, ALTMODE_ABSOLUTE);
+            if (getElevationImpl(p, elevation, desiredResolution, 0L))
             {
-                elevation = 0.0;
-            }
+                if (elevation == NO_DATA_VALUE)
+                {
+                    elevation = 0.0;
+                }
 
-            (*i).z() = ignoreZ ? elevation : elevation + z;
+                (*i).z() = ignoreZ ? elevation : elevation + z;
+            }
+        }
+        return true;
+    }
+    else
+    {
+        // Call ElevationPool::sampleMapCoords directly if there are no terrain patches as it is significantly faster than doing
+        // individual getElevationImpl queries
+        if (pointsSRS != _map->getSRS())
+        {
+            std::vector< osg::Vec3d > mapPoints = points;
+            pointsSRS->transform(mapPoints, _map->getSRS());
+            int count = _map->getElevationPool()->sampleMapCoords(mapPoints.begin(), mapPoints.end(), Distance(desiredResolution, _map->getSRS()->getUnits()), nullptr, nullptr);
+            for (unsigned int i = 0; i < points.size(); ++i)
+            {
+                points[i].z() = mapPoints[i].z();
+            }
+            return count > 0;
+        }
+        else
+        {
+            return _map->getElevationPool()->sampleMapCoords(points.begin(), points.end(), Distance(desiredResolution, _map->getSRS()->getUnits()), nullptr, nullptr) > 0;
         }
     }
-    return true;
 }
 
 bool
@@ -156,22 +178,41 @@ ElevationQuery::getElevations(const std::vector<osg::Vec3d>& points,
                               std::vector<float>&            out_elevations,
                               double                         desiredResolution )
 {
-    sync();
-    for( osg::Vec3dArray::const_iterator i = points.begin(); i != points.end(); ++i )
+    if (_map->getNumTerrainPatchLayers() > 0)
     {
-        float elevation;
-        GeoPoint p(pointsSRS, *i, ALTMODE_ABSOLUTE);
+        sync();
+        for (osg::Vec3dArray::const_iterator i = points.begin(); i != points.end(); ++i)
+        {
+            float elevation;
+            GeoPoint p(pointsSRS, *i, ALTMODE_ABSOLUTE);
 
-        if ( getElevationImpl(p, elevation, desiredResolution, 0L) )
-        {
-            out_elevations.push_back( elevation );
+            if (getElevationImpl(p, elevation, desiredResolution, 0L))
+            {
+                out_elevations.push_back(elevation);
+            }
+            else
+            {
+                out_elevations.push_back(0.0);
+            }
         }
-        else
-        {
-            out_elevations.push_back( 0.0 );
-        }
+        return true;
     }
-    return true;
+    else
+    {
+        // Call ElevationPool::sampleMapCoords directly if there are no terrain patches as it is significantly faster than doing
+        // individual getElevationImpl queries
+        std::vector< osg::Vec3d > mapPoints = points;
+        if (pointsSRS != _map->getSRS())
+        {
+            pointsSRS->transform(mapPoints, _map->getSRS());
+        }
+        int count = _map->getElevationPool()->sampleMapCoords(mapPoints.begin(), mapPoints.end(), Distance(desiredResolution, _map->getSRS()->getUnits()), nullptr, nullptr);
+        for (unsigned int i = 0; i < points.size(); ++i)
+        {
+            out_elevations.push_back(mapPoints[i].z());
+        }
+        return count > 0;
+    }
 }
 
 bool
@@ -269,41 +310,16 @@ ElevationQuery::getElevationImpl(const GeoPoint& point,
     if (!_map.lock(map))
     {
         return false;
-    }    
+    } 
 
-    // tile size (resolution of elevation tiles)
-    unsigned tileSize = 257; // yes?
+    // Set the query resolution:
+    Distance resolution(desiredResolution, map->getSRS()->getUnits());
 
-    // default LOD:
-    unsigned lod = 23u;
-
-    // attempt to map the requested resolution to an LOD:
-    if (desiredResolution > 0.0)
-    {
-        int level = map->getProfile()->getLevelOfDetailForHorizResolution(desiredResolution, tileSize);
-        if ( level > 0 )
-            lod = level;
-    }
-
-    // do we need a new ElevationEnvelope?
-    if (!_envelope.valid() ||
-        !point.getSRS()->isHorizEquivalentTo(_envelope->getSRS()) ||
-        lod != _envelope->getLOD())
-    {        
-        _envelope = map->getElevationPool()->createEnvelope(point.getSRS(), lod);
-    }
-
-    // sample the elevation, and if requested, the resolution as well:
+    // Sample the pool
+    ElevationSample sample = map->getElevationPool()->getSample(point, resolution, &_workingSet);
+    out_elevation = sample.elevation().as(Units::METERS);
     if (out_actualResolution)
-    {
-        std::pair<float, float> result = _envelope->getElevationAndResolution(point.x(), point.y());
-        out_elevation = result.first;
-        *out_actualResolution = result.second;
-    }
-    else
-    {
-        out_elevation = _envelope->getElevation(point.x(), point.y());
-    }
+        *out_actualResolution = sample.resolution().as(map->getSRS()->getUnits());
 
     return out_elevation != NO_DATA_VALUE;
 }

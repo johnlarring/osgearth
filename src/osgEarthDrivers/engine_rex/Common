@@ -1,5 +1,5 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
+/* osgEarth - Geospatial SDK for OpenSceneGraph
  * Copyright 2008-2014 Pelican Mapping
  * http://osgearth.org
  *
@@ -20,5 +20,8 @@
 #define OSGEARTH_DRIVERS_REX_TERRAIN_ENGINE_COMMON_H 1
 
 #include <osgEarth/Common>
+
+#define ARENA_LOAD_TILE "oe.rex.loadtile"
+#define ARENA_CREATE_CHILD "oe.rex.createchild"
 
 #endif // OSGEARTH_DRIVERS_REX_TERRAIN_ENGINE_COMMON_H

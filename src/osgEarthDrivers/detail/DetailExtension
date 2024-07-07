@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -23,12 +23,10 @@
 #include "DetailTerrainEffect"
 #include <osgEarth/Extension>
 #include <osgEarth/MapNode>
-#include <osgEarthUtil/Controls>
 
 namespace osgEarth { namespace Detail
 {
     using namespace osgEarth;
-    using namespace osgEarth::Util::Controls;
 
     /**
      * Extension for loading a detail texture.
@@ -49,16 +47,16 @@ namespace osgEarth { namespace Detail
 
     public: // Extension
 
-        void setDBOptions(const osgDB::Options* dbOptions);
+        void setDBOptions(const osgDB::Options* dbOptions) override;
 
-        const ConfigOptions& getConfigOptions() const { return _options; }
+        const ConfigOptions& getConfigOptions() const override { return _options; }
 
 
     public: // ExtensionInterface<MapNode>
 
-        bool connect(MapNode* mapNode);
+        bool connect(MapNode* mapNode) override;
 
-        bool disconnect(MapNode* mapNode);
+        bool disconnect(MapNode* mapNode) override;
 
         
     private:

@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2015 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -26,6 +26,7 @@
 #include <osgEarth/GLUtils>
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 #define LC "[Lighting] "
 
@@ -47,10 +48,20 @@ Lighting::remove(osg::StateSet* stateSet)
     GLUtils::remove(stateSet, GL_LIGHTING);
 }
 
+void
+Lighting::installDefaultMaterial(osg::StateSet* stateSet)
+{
+    osg::Material* m = new osgEarth::MaterialGL3();
+    m->setDiffuse(m->FRONT, osg::Vec4(1,1,1,1));
+    m->setAmbient(m->FRONT, osg::Vec4(1,1,1,1));
+    stateSet->setAttributeAndModes(m, 1);
+    osgEarth::MaterialCallback().operator()(m, 0L);
+}
+
 //............................................................................
 
 GenerateGL3LightingUniforms::GenerateGL3LightingUniforms() :
-osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+    osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
 {
     setNodeMaskOverride(~0);
 }
@@ -85,7 +96,9 @@ GenerateGL3LightingUniforms::apply(osg::Node& node)
                     if (!mat->getUpdateCallback())
                     {
                         if (stateset->getDataVariance() == osg::Object::DYNAMIC)
+                        {
                             mat->setUpdateCallback(new MaterialCallback());
+                        }
                         else
                         {
                             MaterialCallback mc;
@@ -112,20 +125,26 @@ GenerateGL3LightingUniforms::apply(osg::LightSource& lightSource)
             lightSource.addCullCallback(new LightSourceGL3UniformGenerator());
         }
 
-#if !defined(OSG_GL_FIXED_FUNCTION_AVAILABLE)
+//#if !defined(OSG_GL_FIXED_FUNCTION_AVAILABLE)
         // If there's no FFP, we need to replace the Light with a LightGL3 to prevent
         // error messages on the console.
         if (dynamic_cast<LightGL3*>(lightSource.getLight()) == 0L)
         {
             lightSource.setLight(new LightGL3(*lightSource.getLight()));
         }
-#endif
+//#endif
     }
 
     apply(static_cast<osg::Node&>(lightSource));
 }
 
 //............................................................................
+
+LightSourceGL3UniformGenerator::LightSourceGL3UniformGenerator() :
+    _statesetsMutex()
+{
+    //nop
+}
 
 bool
 LightSourceGL3UniformGenerator::run(osg::Object* obj, osg::Object* data)
@@ -161,7 +180,7 @@ LightSourceGL3UniformGenerator::run(osg::Object* obj, osg::Object* data)
         {
             cv->getCurrentRenderStage()->setStateSet(ss = new osg::StateSet());
 
-            Threading::ScopedMutexLock lock(_statesetsMutex);
+            std::lock_guard<std::mutex> lock(_statesetsMutex);
             _statesets.push_back(ss);
         }
 
@@ -213,7 +232,7 @@ LightSourceGL3UniformGenerator::run(osg::Object* obj, osg::Object* data)
 void
 LightSourceGL3UniformGenerator::resizeGLBufferObjects(unsigned maxSize)
 {
-    Threading::ScopedMutexLock lock(_statesetsMutex);
+    std::lock_guard<std::mutex> lock(_statesetsMutex);
     for(unsigned i=0; i<_statesets.size(); ++i)
         _statesets[i]->resizeGLObjectBuffers(maxSize);
 }
@@ -221,7 +240,7 @@ LightSourceGL3UniformGenerator::resizeGLBufferObjects(unsigned maxSize)
 void
 LightSourceGL3UniformGenerator::releaseGLObjects(osg::State* state) const
 {
-    Threading::ScopedMutexLock lock(_statesetsMutex);
+    std::lock_guard<std::mutex> lock(_statesetsMutex);
     for(unsigned i=0; i<_statesets.size(); ++i)
         _statesets[i]->releaseGLObjects(state);
     _statesets.clear();

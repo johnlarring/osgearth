@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
-* Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+* Copyright 2020 Pelican Mapping
 * http://osgearth.org
 *
 * osgEarth is free software; you can redistribute it and/or modify
@@ -25,7 +25,7 @@
 #include <osgEarth/Common>
 #include <osg/Image>
 
-namespace osgEarth
+namespace osgEarth { namespace Util
 {
     /**
      * Simplex Noise Generator.
@@ -160,8 +160,6 @@ namespace osgEarth
         static double const G4;
 
         unsigned char permMod12[512];
-        //bool permMod12Computed;
-        void ComputePermMod12();
 
         // This method is a *lot* faster than using (int)Math.floor(x)
         inline static int FastFloor(double x);
@@ -181,6 +179,6 @@ namespace osgEarth
         bool _normalize;
     };
 
-} // namespace osgEarth
+} } // namespace osgEarth
 
 #endif //OSGEARTH_SIMPLEX_NOISE_H

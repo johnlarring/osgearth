@@ -1,6 +1,6 @@
 /* -*-c++-*- */
-/* osgEarth - Dynamic map generation toolkit for OpenSceneGraph
- * Copyright 2016 Pelican Mapping
+/* osgEarth - Geospatial SDK for OpenSceneGraph
+ * Copyright 2020 Pelican Mapping
  * http://osgearth.org
  *
  * osgEarth is free software; you can redistribute it and/or modify
@@ -18,14 +18,16 @@
  */
 
 #include <osgEarth/FileUtils>
+#include <osgEarth/Registry>
 #include <osgEarth/StringUtils>
-#include <osgEarth/ThreadingUtils>
+#include "Notify"
 #include <osgDB/FileUtils>
 #include <osgDB/FileNameUtils>
 #include <osgDB/ConvertUTF>
+#include <osg/Object>
 #include <stack>
 
-#include <errno.h> 
+#include <errno.h>
 
 #ifdef WIN32
 #  include <windows.h>
@@ -96,9 +98,14 @@
     // Unfortunately, we can't use the label MAC_OS_X_VERSION_10_4
     // for older OS's like Jaguar, Panther since they are not defined,
     // so I am going to hardcode the number.
-    #if (MAC_OS_X_VERSION_MAX_ALLOWED <= 1040)
+    #if (MAC_OS_X_VERSION_MAX_ALLOWED <= 1040 )
         #define stat64 stat
     #endif
+
+    #if MAC_OS_X_VERSION_MAX_ALLOWED >= 101300 && __DARWIN_ONLY_64_BIT_INO_T
+        #define stat64 stat
+    #endif
+
 #elif defined(__CYGWIN__) || defined(__FreeBSD__) || (defined(__hpux) && !defined(_LARGEFILE64_SOURCE))
     #define stat64 stat
 #endif
@@ -122,6 +129,7 @@
 
 
 using namespace osgEarth;
+using namespace osgEarth::Util;
 
 namespace osgEarth
 {
@@ -146,12 +154,13 @@ namespace osgEarth
 
 
 std::string
-osgEarth::getAbsolutePath(const std::string& path)
+osgEarth::Util::getAbsolutePath(const std::string& path)
 {
     return osgDB::convertFileNameToUnixStyle( osgDB::getRealPath(path) );
 }
 
-bool osgEarth::isRelativePath(const std::string& fileName)
+bool
+osgEarth::Util::isRelativePath(const std::string& fileName)
 {
     //If it is a URL, it is not relative
     if (osgDB::containsServerAddress( fileName ) ) return false;
@@ -172,21 +181,42 @@ bool osgEarth::isRelativePath(const std::string& fileName)
 #endif
 }
 
-std::string osgEarth::getFullPath(const std::string& relativeTo, const std::string &relativePath)
+std::map<std::string, std::string>
+osgEarth::Util::extractQueryParams(const std::string& url) {
+    std::map<std::string, std::string> queryParams;
+
+    size_t pos = url.find('?');
+    if (pos != std::string::npos) {
+        std::string queryParameters = url.substr(pos + 1);
+        std::stringstream ss(queryParameters);
+        std::string param;
+        while (std::getline(ss, param, '&')) {
+            pos = param.find('=');
+            if (pos != std::string::npos) {
+                std::string key = param.substr(0, pos);
+                std::string value = param.substr(pos + 1);
+                queryParams[key] = value;
+            }
+        }
+    }
+
+    return queryParams;
+}
+
+std::string
+osgEarth::Util::getFullPath(const std::string& relativeTo, const std::string &relativePath)
 {
-    // A cache, since this method uses osgDB::getRealPath which can be quite slow.
-    static Threading::Mutex s_cacheMutex;
-    typedef std::map<std::string, std::string> PathCache;
-    static PathCache s_cache;
+    static std::unordered_map<std::string, std::string> s_cache;
+    static std::mutex s_cache_mutex;
     //static float tries = 0, hits = 0;
 
     std::string cacheKey = relativeTo + "&" + relativePath;
 
-    Threading::ScopedMutexLock lock(s_cacheMutex);
+    std::lock_guard<std::mutex> lock(s_cache_mutex);
 
     //tries += 1.0f;
 
-    PathCache::const_iterator i = s_cache.find(cacheKey);
+    auto i = s_cache.find(cacheKey);
     if (i != s_cache.end())
     {
         //hits += 1.0f;
@@ -201,16 +231,50 @@ std::string osgEarth::getFullPath(const std::string& relativeTo, const std::stri
     // result that will go into the cache:
     std::string result;
 
-	if (!isRelativePath(relativePath) || relativeTo.empty())
+    std::string relativeToMinusQueryParams = relativeTo;
+    std::string relativePathMinusQueryParams = relativePath;
+    std::map< std::string, std::string> queryParams;
+    // We are going to merge query parameters on both the relativeTo and relativePath arguments for the final URL.
+    if (osgDB::containsServerAddress(relativeTo))
     {
-        //OE_NOTICE << relativePath << " is not a relative path " << std::endl;
-        result = relativePath;
+        queryParams = extractQueryParams(relativeTo);
+        auto queryParams2 = extractQueryParams(relativePath);
+        for (auto& p : queryParams2)
+        {
+            queryParams.insert(p);
+        }
+
+        relativeToMinusQueryParams = removeQueryParams(relativeTo);
+        relativePathMinusQueryParams = removeQueryParams(relativePath);
+    }
+
+    // If the relativePath starts with a / then it's really relative to the root server address of the relativeTo.
+    // For example if relativeTo is http://example.com/assets/1 and the relativePath is /models/7 then the final URL should be
+    // http://example.com/models/7
+    if (osgDB::containsServerAddress(relativeToMinusQueryParams) && osgEarth::startsWith(relativePathMinusQueryParams, "/"))
+    {
+        std::string serverAddress = osgDB::getServerProtocol(relativeToMinusQueryParams) + "://" + osgDB::getServerAddress(relativeToMinusQueryParams);
+        std::string filename = serverAddress + relativePathMinusQueryParams;
+        std::string path = stripRelativePaths(filename);                     
+        result = path;
+    }
+
+    // If they passed in an absolute path, strip any relative paths that might be embedded in the path.
+    // So if they passed in c:/data/models/../../file.jpg this will return the resolved path of c:/file.jpg
+    else if (!isRelativePath(relativePathMinusQueryParams))
+    {
+        result = stripRelativePaths(relativePathMinusQueryParams);
+    }
+    // They passed in a relative path but no relativeTo, so just return the relativePath as is.
+    else if (relativeToMinusQueryParams.empty())
+    {
+        result = relativePathMinusQueryParams;
     }
 
     //If they didn't specify a relative path, just return the relativeTo
-    else if (relativePath.empty())
+    else if (relativePathMinusQueryParams.empty())
     {
-        result = relativeTo;
+        result = relativeToMinusQueryParams;
     }
 
     else
@@ -219,49 +283,37 @@ std::string osgEarth::getFullPath(const std::string& relativeTo, const std::stri
 
         //Concatinate the paths together
         std::string filename;
-        if ( !osgDB::containsServerAddress( relativeTo ) )
-            filename = osgDB::concatPaths( osgDB::getFilePath( osgDB::getRealPath( relativeTo )), relativePath);
+        if ( !osgDB::containsServerAddress(relativeToMinusQueryParams) )
+            filename = osgDB::concatPaths( osgDB::getFilePath( osgDB::getRealPath(relativeToMinusQueryParams)), relativePathMinusQueryParams);
         else
-            filename = osgDB::concatPaths( osgDB::getFilePath( relativeTo ), relativePath);
+            filename = osgDB::concatPaths( osgDB::getFilePath(relativeToMinusQueryParams), relativePathMinusQueryParams);
 
-
-        std::list<std::string> directories;
-        int start = 0;
-        for (unsigned int i = 0; i < filename.size(); ++i)
-        {
-            if (filename[i] == '\\' || filename[i] == '/')
-            {
-                //Get the current directory
-                std::string dir = filename.substr(start, i-start);
-
-                if (dir != "..")
-                {
-                    if (dir != ".")
-                    {
-                      directories.push_back(dir);
-                    }
-                }
-                else if (!directories.empty())
-                {
-                    directories.pop_back();
-                }
-                start = i + 1;
-            }
-        }
-
-        std::string path;
-        for (std::list<std::string>::iterator itr = directories.begin();
-             itr != directories.end();
-             ++itr)
-        {
-            path += *itr;
-            path += "/";
-        }
-
-        path += filename.substr(start, std::string::npos);
+        std::string path = stripRelativePaths(filename);
 
         //OE_NOTICE << "FullPath " << path << std::endl;
         result = path;
+    }
+
+    // Append the merged query parameters to the result
+    if (!queryParams.empty())
+    {
+        std::stringstream buf;
+        bool firstParam = true;
+        for (auto& p : queryParams)
+        {
+            if (!firstParam)
+            {
+                buf << "&";
+            }
+            buf << p.first << "=" << p.second;
+            firstParam = false;
+        }
+
+        std::string queryParamsStr = buf.str();
+        if (!queryParamsStr.empty())
+        {
+            result = result + "?" + queryParamsStr;
+        }
     }
 
     // cache the result and return it.
@@ -269,20 +321,77 @@ std::string osgEarth::getFullPath(const std::string& relativeTo, const std::stri
     return result;
 }
 
+std::string
+osgEarth::Util::stripRelativePaths(const std::string& filename)
+{
+    // If they pass in a relative path just return it unmodified
+    if (isRelativePath(filename))
+    {
+        return filename;
+    }
+
+    std::list<std::string> directories;
+    int start = 0;
+    for (unsigned int i = 0; i < filename.size(); ++i)
+    {
+        if (filename[i] == '\\' || filename[i] == '/')
+        {
+            //Get the current directory
+            std::string dir = filename.substr(start, i - start);
+
+            if (dir != "..")
+            {
+                if (dir != ".")
+                {
+                    directories.push_back(dir);
+                }
+            }
+            else if (!directories.empty())
+            {
+                directories.pop_back();
+            }
+            start = i + 1;
+        }
+    }
+
+    std::string path;
+    for (std::list<std::string>::iterator itr = directories.begin();
+        itr != directories.end();
+        ++itr)
+    {
+        path += *itr;
+        path += "/";
+    }
+
+    path += filename.substr(start, std::string::npos);
+    return path;
+}
+
+std::string osgEarth::Util::removeQueryParams(const std::string& uri) {
+    std::string::size_type pos = uri.find('?');
+    if (pos != std::string::npos) {
+        return uri.substr(0, pos);
+    }
+    return uri;
+}
+
+// force getFullPath's statics to be initialized at startup
+OSG_INIT_SINGLETON_PROXY(osgEarthFileUtilsGetFullPathInitSingletonProxy, osgEarth::Util::getFullPath(std::string(), std::string()));
+
 bool
-osgEarth::isArchive(const std::string& path)
+osgEarth::Util::isArchive(const std::string& path)
 {
     osgDB::Registry::ArchiveExtensionList list = osgDB::Registry::instance()->getArchiveExtensions();
     for( osgDB::Registry::ArchiveExtensionList::const_iterator i = list.begin(); i != list.end(); ++i )
     {
-        if ( osgEarth::endsWith(path, ("."+*i), false) )
+        if ( osgEarth::Util::endsWith(path, ("."+*i), false) )
             return true;
     }
     return false;
 }
 
 bool
-osgEarth::isPathToArchivedFile(const std::string& path)
+osgEarth::Util::isPathToArchivedFile(const std::string& path)
 {
     osgDB::Registry::ArchiveExtensionList list = osgDB::Registry::instance()->getArchiveExtensions();
     for( osgDB::Registry::ArchiveExtensionList::const_iterator i = list.begin(); i != list.end(); ++i )
@@ -296,16 +405,17 @@ osgEarth::isPathToArchivedFile(const std::string& path)
     return false;
 }
 
-std::string osgEarth::getTempPath()
+std::string
+osgEarth::Util::getTempPath()
 {
 #if defined(WIN32)  && !defined(__CYGWIN__)
     BOOL fSuccess  = FALSE;
 
-    TCHAR lpTempPathBuffer[MAX_PATH];    
+    TCHAR lpTempPathBuffer[MAX_PATH];
 
     //  Gets the temp path env string (no guarantee it's a valid path).
     DWORD dwRetVal = ::GetTempPath(MAX_PATH,          // length of the buffer
-        lpTempPathBuffer); // buffer for path     
+        lpTempPathBuffer); // buffer for path
 
     if (dwRetVal > MAX_PATH || (dwRetVal == 0))
     {
@@ -319,22 +429,23 @@ std::string osgEarth::getTempPath()
 #endif
 }
 
-std::string osgEarth::getTempName(const std::string& prefix, const std::string& suffix)
+std::string
+osgEarth::Util::getTempName(const std::string& prefix, const std::string& suffix)
 {
     //tmpname is kind of busted on Windows, it always returns a file of the form \blah which gets put in your root directory but
     //oftentimes can't get opened by some drivers b/c it doesn't have a drive letter in front of it.
     while (true)
     {
         std::stringstream ss;
-        ss << prefix << "~" << rand() << suffix;
+        ss << prefix << "~" << std::this_thread::get_id() << "_" << rand() << suffix;
         if (!osgDB::fileExists(ss.str()))
             return ss.str();
     }
-//    return "";
 }
 
-bool osgEarth::makeDirectory( const std::string &path )
-{    
+bool
+osgEarth::Util::makeDirectory( const std::string &path )
+{
     if (path.empty())
     {
         OSG_DEBUG << "osgDB::makeDirectory(): cannot create an empty directory" << std::endl;
@@ -374,7 +485,7 @@ bool osgEarth::makeDirectory( const std::string &path )
             switch( errno )
             {
                 case ENOENT:
-                case ENOTDIR:                    
+                case ENOTDIR:
                     paths.push( dir );
                     break;
 
@@ -403,12 +514,12 @@ bool osgEarth::makeDirectory( const std::string &path )
 #else
         if( mkdir( dir.c_str(), 0755 )< 0 )
 #endif
-        {            
+        {
             if (osgDB::fileExists(dir))
             {
                 OE_DEBUG << "Attempt to create directory that already exists " << dir << std::endl;
             }
-            else            
+            else
             {
                 OSG_DEBUG << "osgDB::makeDirectory(): "  << strerror(errno) << std::endl;
                 return false;
@@ -419,14 +530,15 @@ bool osgEarth::makeDirectory( const std::string &path )
     return true;
 }
 
-bool osgEarth::makeDirectoryForFile( const std::string &path )
+bool
+osgEarth::Util::makeDirectoryForFile( const std::string &path )
 {
-    return osgEarth::makeDirectory( osgDB::getFilePath( path ));
+    return makeDirectory( osgDB::getFilePath( path ));
 }
 
 
 bool
-osgEarth::touchFile(const std::string& path)
+osgEarth::Util::touchFile(const std::string& path)
 {
     DateTime now;
     struct ::utimbuf ut;
@@ -437,7 +549,7 @@ osgEarth::touchFile(const std::string& path)
 
 
 TimeStamp
-osgEarth::getLastModifiedTime(const std::string& path)
+osgEarth::Util::getLastModifiedTime(const std::string& path)
 {
     struct stat buf;
     if ( stat(path.c_str(), &buf) == 0 )
@@ -450,7 +562,7 @@ osgEarth::getLastModifiedTime(const std::string& path)
 /**************************************************/
 DirectoryVisitor::DirectoryVisitor()
 {
-}    
+}
 
 void DirectoryVisitor::handleFile( const std::string& filename )
 {
@@ -464,7 +576,7 @@ bool DirectoryVisitor::handleDir( const std::string& path )
 void DirectoryVisitor::traverse(const std::string& path )
 {
 	if ( osgDB::fileType(path) == osgDB::DIRECTORY )
-	{            
+	{
 		if (handleDir( path ))
 		{
 			osgDB::DirectoryContents files = osgDB::getDirectoryContents(path);
@@ -474,23 +586,23 @@ void DirectoryVisitor::traverse(const std::string& path )
 					continue;
 
 				std::string filepath = osgDB::concatPaths( path, *f );
-				traverse( filepath );                
+				traverse( filepath );
 			}
 		}
 	}
 	else if ( osgDB::fileType(path) == osgDB::REGULAR_FILE )
 	{
-		handleFile( path );            
+		handleFile( path );
 	}
 }
 
 /**************************************************/
-CollectFilesVisitor::CollectFilesVisitor()  
+CollectFilesVisitor::CollectFilesVisitor()
 {
 }
 
 void CollectFilesVisitor::handleFile( const std::string& filename )
 {
-	filenames.push_back( filename );        
+	filenames.push_back( filename );
 }
 
